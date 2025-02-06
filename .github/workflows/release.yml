@@ -5,6 +5,8 @@ on:
       - "v*"
 permissions:
   contents: write
+  attestations: write
+  id-token: write
 
 jobs:
   release:

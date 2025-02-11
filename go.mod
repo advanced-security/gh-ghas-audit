@@ -1,7 +1,6 @@
 module github.com/advanced-security/gh-ghas-audit
 
 go 1.23
-
 require (
 	github.com/cli/go-gh/v2 v2.11.2
 	github.com/fatih/color v1.18.0

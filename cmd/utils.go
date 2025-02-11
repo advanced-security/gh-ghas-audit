@@ -82,15 +82,32 @@ func ListOrgs(client *api.RESTClient) ([]string, error) {
 
 // listRepos returns a list of repository names under a given org.
 func ListRepos(client *api.RESTClient, org string) ([]string, error) {
-	response := []struct{ Name string }{}
-	err := client.Get(fmt.Sprintf("orgs/%s/repos", org), &response)
-	if err != nil {
-		return nil, err
+	perPage := 100
+	page := 1
+	var repos []string
+
+	for {
+		url := fmt.Sprintf("orgs/%s/repos?per_page=%d&page=%d", org, perPage, page)
+		var response []struct {
+			Name string
+		}
+		err := client.Get(url, &response)
+		if err != nil {
+			return nil, err
+		}
+		if len(response) == 0 {
+			break
+		}
+		for _, repo := range response {
+			repos = append(repos, repo.Name)
+		}
+		// if less than perPage, no more pages
+		if len(response) < perPage {
+			break
+		}
+		page++
 	}
-	repos := make([]string, len(response))
-	for i, repo := range response {
-		repos[i] = repo.Name
-	}
+
 	return repos, nil
 }
 

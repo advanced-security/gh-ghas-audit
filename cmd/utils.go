@@ -95,14 +95,15 @@ func ListRepos(client *api.RESTClient, org string) ([]string, error) {
 		if err != nil {
 			return nil, err
 		}
-		if len(response) == 0 {
+		numResults := len(response)
+		if numResults == 0 {
 			break
 		}
 		for _, repo := range response {
 			repos = append(repos, repo.Name)
 		}
 		// if less than perPage, no more pages
-		if len(response) < perPage {
+		if numResults < perPage {
 			break
 		}
 		page++

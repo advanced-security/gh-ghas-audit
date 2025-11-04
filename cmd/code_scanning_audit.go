@@ -16,6 +16,60 @@ var codeScanningAuditCmd = &cobra.Command{
 	Run:   runCodeScanningAudit,
 }
 
+// processRepository processes a single repository and returns a report entry
+func processRepository(client *api.RESTClient, org, repo string) ReportEntry {
+	languageCoverage, err := GetLanguages(client, org, repo)
+	if err != nil {
+		fmt.Println("Error getting languages:", err)
+		languageCoverage = make(LanguageCoverage)
+	}
+	repoLangs := NormalizeLanguages(languageCoverage)
+
+	defaultSetup, err := GetDefaultSetup(client, org, repo)
+	if err != nil {
+		unknownReason := "Unknown"
+		if strings.Contains(err.Error(), "Advanced Security must be enabled") {
+			unknownReason = "GHAS is not enabled"
+		}
+		return ReportEntry{
+			Organization:           org,
+			Repository:             repo,
+			DefaultSetupEnabled:    unknownReason,
+			LanguagesInRepo:        strings.Join(repoLangs, ", "),
+			DefaultSetupConfigured: "Unknown",
+			NotConfiguredLangs:     "Unknown",
+		}
+	}
+
+	defaultSetupEnabled := "Disabled"
+	if strings.ToLower(defaultSetup.State) == "configured" {
+		defaultSetupEnabled = "Enabled"
+	}
+
+	confLangs := []string{}
+	seen := make(map[string]bool)
+	for _, c := range defaultSetup.Languages {
+		mapped, ok := LANGUAGE_MAPPING[strings.ToLower(c)]
+		if !ok {
+			continue
+		}
+		if !seen[mapped] {
+			seen[mapped] = true
+			confLangs = append(confLangs, mapped)
+		}
+	}
+
+	configurable := ArrayDiff(repoLangs, confLangs)
+	return ReportEntry{
+		Organization:           org,
+		Repository:             repo,
+		DefaultSetupEnabled:    defaultSetupEnabled,
+		LanguagesInRepo:        strings.Join(repoLangs, ", "),
+		DefaultSetupConfigured: strings.Join(confLangs, ", "),
+		NotConfiguredLangs:     strings.Join(configurable, ", "),
+	}
+}
+
 func runCodeScanningAudit(c *cobra.Command, args []string) {
 	fmt.Println("Starting audit...")
 
@@ -44,18 +98,6 @@ func runCodeScanningAudit(c *cobra.Command, args []string) {
 		printer = NewTerminalPrinter(terminal.Out(), terminal.IsTerminalOutput(), termWidth)
 	}
 
-	// Helper function to add a report entry
-	addReportEntry := func(org, repo, defaultSetupEnabled, languagesInRepo, defaultSetupConfigured, notConfiguredLangs string) {
-		report.Entries = append(report.Entries, ReportEntry{
-			Organization:           org,
-			Repository:             repo,
-			DefaultSetupEnabled:    defaultSetupEnabled,
-			LanguagesInRepo:        languagesInRepo,
-			DefaultSetupConfigured: defaultSetupConfigured,
-			NotConfiguredLangs:     notConfiguredLangs,
-		})
-	}
-
 	// If single repository is provided.
 	if Repository != "" {
 		fmt.Println("Processing single repository:", Repository)
@@ -65,42 +107,8 @@ func runCodeScanningAudit(c *cobra.Command, args []string) {
 			return
 		}
 
-		languageCoverage, err := GetLanguages(client, org, singleRepo)
-		if err != nil {
-			fmt.Println("Error getting languages:", err)
-			languageCoverage = make(LanguageCoverage)
-		}
-		repoLangs := NormalizeLanguages(languageCoverage)
-
-		defaultSetup, err := GetDefaultSetup(client, org, singleRepo)
-		if err != nil {
-			unknownReason := "Unknown"
-			if strings.Contains(err.Error(), "Advanced Security must be enabled") {
-				unknownReason = "GHAS is not enabled"
-			}
-			addReportEntry(org, singleRepo, unknownReason, strings.Join(repoLangs, ", "), "Unknown", "Unknown")
-		} else {
-			defaultSetupEnabled := "Disabled"
-			if strings.ToLower(defaultSetup.State) == "configured" {
-				defaultSetupEnabled = "Enabled"
-			}
-
-			confLangs := []string{}
-			seen := make(map[string]bool)
-			for _, c := range defaultSetup.Languages {
-				mapped, ok := LANGUAGE_MAPPING[strings.ToLower(c)]
-				if !ok {
-					continue
-				}
-				if !seen[mapped] {
-					seen[mapped] = true
-					confLangs = append(confLangs, mapped)
-				}
-			}
-
-			configurable := ArrayDiff(repoLangs, confLangs)
-			addReportEntry(org, singleRepo, defaultSetupEnabled, strings.Join(repoLangs, ", "), strings.Join(confLangs, ", "), strings.Join(configurable, ", "))
-		}
+		entry := processRepository(client, org, singleRepo)
+		report.Entries = append(report.Entries, entry)
 	} else {
 		// Otherwise, handle multiple organizations
 		orgs := strings.Split(Organizations, ",")
@@ -121,43 +129,8 @@ func runCodeScanningAudit(c *cobra.Command, args []string) {
 			fmt.Printf("Found %d repositories in %s\n", len(repos), org)
 			for i, repo := range repos {
 				fmt.Printf(" - Processing repository: %s [%d/%d]\n", repo, i+1, len(repos))
-				languageCoverage, err := GetLanguages(client, org, repo)
-				if err != nil {
-					fmt.Println("Error getting languages for", repo+":", err)
-					languageCoverage = make(LanguageCoverage)
-				}
-				repoLangs := NormalizeLanguages(languageCoverage)
-
-				defaultSetup, err := GetDefaultSetup(client, org, repo)
-				if err != nil {
-					unknownReason := "Unknown"
-					if strings.Contains(err.Error(), "Advanced Security must be enabled") {
-						unknownReason = "GHAS is not enabled"
-					}
-					addReportEntry(org, repo, unknownReason, strings.Join(repoLangs, ", "), "Unknown", "Unknown")
-					continue
-				}
-
-				defaultSetupEnabled := "Disabled"
-				if strings.ToLower(defaultSetup.State) == "configured" {
-					defaultSetupEnabled = "Enabled"
-				}
-
-				confLangs := []string{}
-				seen := make(map[string]bool)
-				for _, c := range defaultSetup.Languages {
-					mapped, ok := LANGUAGE_MAPPING[strings.ToLower(c)]
-					if !ok {
-						continue
-					}
-					if !seen[mapped] {
-						seen[mapped] = true
-						confLangs = append(confLangs, mapped)
-					}
-				}
-
-				configurable := ArrayDiff(repoLangs, confLangs)
-				addReportEntry(org, repo, defaultSetupEnabled, strings.Join(repoLangs, ", "), strings.Join(confLangs, ", "), strings.Join(configurable, ", "))
+				entry := processRepository(client, org, repo)
+				report.Entries = append(report.Entries, entry)
 			}
 			fmt.Println("Finished processing organization:", org)
 		}

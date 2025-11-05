@@ -3,6 +3,7 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -86,14 +87,14 @@ func ListOrgs(client *api.RESTClient) ([]string, error) {
 
 // makeRequestWithRetry executes an API request with rate limit handling and retries.
 // Returns the response or an error after exhausting retries.
-func makeRequestWithRetry(client *api.RESTClient, method string, path string, body interface{}) (*http.Response, error) {
+func makeRequestWithRetry(client *api.RESTClient, method string, path string, body io.Reader) (*http.Response, error) {
 	maxRetries := 5
 
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		if attempt > 0 {
 			fmt.Printf("Retry attempt %d/%d for request...\n", attempt, maxRetries)
 		}
-		resp, err := client.Request(method, path, nil)
+		resp, err := client.Request(method, path, body)
 
 		// Check if error is due to rate limiting
 		if err != nil {

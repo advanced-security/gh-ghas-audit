@@ -12,6 +12,11 @@ import (
 	"github.com/cli/go-gh/v2/pkg/api"
 )
 
+const (
+	// defaultRateLimitWaitSeconds is the fallback wait duration when no rate limit reset header is provided
+	defaultRateLimitWaitSeconds = 60
+)
+
 // LANGUAGE_MAPPING normalizes different language names into a standard set.
 var LANGUAGE_MAPPING = map[string]string{
 	"actions":               "actions",
@@ -224,8 +229,8 @@ func handleRateLimitFromError(httpErr *api.HTTPError) bool {
 			}
 		}
 		// If no reset header, wait a default amount
-		fmt.Println("No X-RateLimit-Reset header found, waiting 60 seconds...")
-		time.Sleep(60 * time.Second)
+		fmt.Printf("No X-RateLimit-Reset header found, waiting %d seconds...\n", defaultRateLimitWaitSeconds)
+		time.Sleep(defaultRateLimitWaitSeconds * time.Second)
 		return true
 	}
 

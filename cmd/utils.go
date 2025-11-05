@@ -15,6 +15,8 @@ import (
 const (
 	// defaultRateLimitWaitSeconds is the fallback wait duration when no rate limit reset header is provided
 	defaultRateLimitWaitSeconds = 60
+	// rateLimitResetBuffer is added to the calculated wait duration to ensure the rate limit has reset
+	rateLimitResetBuffer = 1 * time.Second
 )
 
 // LANGUAGE_MAPPING normalizes different language names into a standard set.
@@ -214,7 +216,7 @@ func handleRateLimitFromError(httpErr *api.HTTPError) bool {
 			if resetUnix, err := strconv.ParseInt(resetHeader, 10, 64); err == nil {
 				resetAt := time.Unix(resetUnix, 0)
 				now := time.Now()
-				waitDuration := time.Until(resetAt) + (1 * time.Second) // Add 1s buffer
+				waitDuration := time.Until(resetAt) + rateLimitResetBuffer
 				fmt.Printf("Rate limit reset at: %s, Current time: %s, Wait duration: %.0f seconds\n",
 					resetAt.Format("15:04:05"), now.Format("15:04:05"), waitDuration.Seconds())
 				if waitDuration > 0 {

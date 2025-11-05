@@ -89,7 +89,7 @@ func ListOrgs(client *api.RESTClient) ([]string, error) {
 func makeRequestWithRetry(client *api.RESTClient, method string, path string, body interface{}) (*http.Response, error) {
 	maxRetries := 5
 
-	for attempt := 0; attempt <= maxRetries; attempt++ {
+	for attempt := 0; attempt < maxRetries; attempt++ {
 		if attempt > 0 {
 			fmt.Printf("Retry attempt %d/%d for request...\n", attempt, maxRetries)
 		}

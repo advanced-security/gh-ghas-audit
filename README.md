@@ -19,8 +19,8 @@ GHAS Audit helps you:
    - Default setup configuration using GitHub's [code scanning default setup API endpoints][default-setup-api].
 3. **Processing:** Each repository is processed to determine if code scanning is enabled, the list of normalized languages detected, and any languages not configured.
 4. **Reporting:** The results are compiled into a report:
-   - **Terminal Output:** Displays a formatted table.
-   - **CSV Output:** Exports results to a specified CSV file.
+   - **Terminal Output:** Displays a formatted table after all repositories are processed.
+   - **CSV Output:** Writes results incrementally to the specified CSV file as each repository is audited, ensuring partial results are saved even if the process is interrupted.
 
 ## Prerequisites
 
@@ -77,6 +77,8 @@ gh ghas-audit code-scanning -o my-org
 ```
 
 ### CSV Output
+
+Export results to a CSV file for further analysis or record-keeping. Results are written incrementally as each repository is processed, so if the audit is interrupted, partial results will still be available in the CSV file.
 
 ```bash
 gh ghas-audit code-scanning -o my-org --csv-output audit-report.csv

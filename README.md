@@ -68,6 +68,8 @@ Global Flags:
       --csv-output string      File path to output CSV report
   -o, --organizations string   Comma separated list of organizations to audit
   -r, --repository string      Single repository to audit
+      --skip-archived          Skip archived repositories
+      --skip-forks             Skip forked repositories
 ```
 
 ### Terminal Output

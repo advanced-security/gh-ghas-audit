@@ -13,6 +13,7 @@ var (
 	Repository    string
 	CSVOutput     string // File path for CSV output
 	SkipArchived  bool   // Skip archived repositories
+	SkipForks     bool   // Skip forked repositories
 )
 
 // rootCmd is the base command called without any subcommands.
@@ -51,6 +52,12 @@ func init() {
 		"skip-archived",
 		false,
 		"Skip archived repositories",
+	)
+	rootCmd.PersistentFlags().BoolVar(
+		&SkipForks,
+		"skip-forks",
+		false,
+		"Skip forked repositories",
 	)
 
 	// Attach code-scanning subcommand.

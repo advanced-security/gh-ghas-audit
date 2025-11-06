@@ -27,12 +27,14 @@ type Report struct {
 
 // Printer interface for outputting the report.
 type Printer interface {
+	PrintEntry(entry *ReportEntry) error
 	PrintReport(report *Report) error
 }
 
 // TerminalPrinter prints the report to the terminal.
 type TerminalPrinter struct {
 	TablePrinter tableprinter.TablePrinter
+	entries      []ReportEntry
 }
 
 // CSVPrinter prints the report to a CSV file.
@@ -59,8 +61,10 @@ func NewCSVPrinter(filePath string) (*CSVPrinter, error) {
 		"Not configured (supported languages)",
 	}
 	if err := writer.Write(header); err != nil {
+		file.Close()
 		return nil, fmt.Errorf("error writing CSV header: %w", err)
 	}
+	writer.Flush()
 
 	return &CSVPrinter{
 		Writer: writer,
@@ -68,10 +72,22 @@ func NewCSVPrinter(filePath string) (*CSVPrinter, error) {
 	}, nil
 }
 
+// PrintEntry buffers a single entry for terminal output.
+func (tp *TerminalPrinter) PrintEntry(entry *ReportEntry) error {
+	tp.entries = append(tp.entries, *entry)
+	return nil
+}
+
 // PrintReport prints the report to the terminal.
 func (tp *TerminalPrinter) PrintReport(report *Report) error {
+	// Use buffered entries if available, otherwise use report entries
+	entries := tp.entries
+	if len(entries) == 0 {
+		entries = report.Entries
+	}
+
 	// Loop through entries using a local variable to speed up repeated look-ups.
-	for _, entry := range report.Entries {
+	for _, entry := range entries {
 		tp.TablePrinter.AddField(entry.Organization, tableprinter.WithColor(wrapColorFunc(color.New(color.FgGreen).SprintfFunc())))
 		tp.TablePrinter.AddField(entry.Repository, tableprinter.WithColor(wrapColorFunc(color.New(color.FgGreen).SprintfFunc())))
 		tp.TablePrinter.AddField(entry.DefaultSetupEnabled, tableprinter.WithColor(wrapColorFunc(color.New(color.FgGreen).SprintfFunc())))
@@ -83,21 +99,25 @@ func (tp *TerminalPrinter) PrintReport(report *Report) error {
 	return tp.TablePrinter.Render()
 }
 
-// PrintReport prints the report to a CSV file.
-func (cp *CSVPrinter) PrintReport(report *Report) error {
-	for _, entry := range report.Entries {
-		row := []string{
-			entry.Organization,
-			entry.Repository,
-			entry.DefaultSetupEnabled,
-			entry.LanguagesInRepo,
-			entry.DefaultSetupConfigured,
-			entry.NotConfiguredLangs,
-		}
-		if err := cp.Writer.Write(row); err != nil {
-			return fmt.Errorf("error writing CSV row: %w", err)
-		}
+// PrintEntry writes a single entry incrementally to the CSV file.
+func (cp *CSVPrinter) PrintEntry(entry *ReportEntry) error {
+	row := []string{
+		entry.Organization,
+		entry.Repository,
+		entry.DefaultSetupEnabled,
+		entry.LanguagesInRepo,
+		entry.DefaultSetupConfigured,
+		entry.NotConfiguredLangs,
 	}
+	if err := cp.Writer.Write(row); err != nil {
+		return fmt.Errorf("error writing CSV row: %w", err)
+	}
+	cp.Writer.Flush()
+	return cp.Writer.Error()
+}
+
+// PrintReport flushes the CSV writer and closes the file.
+func (cp *CSVPrinter) PrintReport(report *Report) error {
 	cp.Writer.Flush()
 	return cp.File.Close()
 }
@@ -120,5 +140,8 @@ func NewTerminalPrinter(out io.Writer, isTerminal bool, termWidth int) *Terminal
 	tp.AddField("Not configured (supported languages)", tableprinter.WithColor(wrapColorFunc(color.New(color.FgHiWhite).SprintfFunc())), tableprinter.WithTruncate(nil))
 	tp.EndRow()
 
-	return &TerminalPrinter{TablePrinter: tp}
+	return &TerminalPrinter{
+		TablePrinter: tp,
+		entries:      make([]ReportEntry, 0),
+	}
 }

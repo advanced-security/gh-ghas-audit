@@ -9,9 +9,10 @@ import (
 
 // Holds flags for organizations and repository.
 var (
-	Organizations string
-	Repository    string
-	CSVOutput     string // File path for CSV output
+	Organizations         string
+	Repository            string
+	CSVOutput             string // File path for CSV output
+	SecurityConfiguration string // Security configuration name to filter repos
 )
 
 // rootCmd is the base command called without any subcommands.
@@ -45,8 +46,7 @@ func init() {
 		"",
 		"File path to output CSV report",
 	)
-
-	// Attach code-scanning subcommand.
+	rootCmd.PersistentFlags().StringVar(&SecurityConfiguration, "security-configuration", "", "Filter repositories by security configuration name")
 	rootCmd.AddCommand(codeScanningAuditCmd)
 }
 

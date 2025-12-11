@@ -65,9 +65,10 @@ Flags:
   -h, --help   help for code-scanning
 
 Global Flags:
-      --csv-output string      File path to output CSV report
-  -o, --organizations string   Comma separated list of organizations to audit
-  -r, --repository string      Single repository to audit
+      --csv-output string               File path to output CSV report
+  -o, --organizations string            Comma separated list of organizations to audit
+  -r, --repository string               Single repository to audit
+      --security-configuration string   Filter repositories by security configuration name
 ```
 
 ### Terminal Output
@@ -81,6 +82,20 @@ gh ghas-audit code-scanning -o my-org
 ```bash
 gh ghas-audit code-scanning -o my-org --csv-output audit-report.csv
 ```
+
+### Filter by Security Configuration
+
+You can filter the audit to only include repositories that have a specific security configuration attached:
+
+```bash
+# Using configuration name
+gh ghas-audit code-scanning -o my-org --security-configuration "Production Config"
+```
+
+This is useful when you want to:
+- Audit only repositories with specific security policies
+- Verify compliance for a subset of repositories
+- Generate reports for different security tiers
 
 ### Example Usages
 

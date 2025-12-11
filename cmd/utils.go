@@ -128,8 +128,121 @@ func makeRequestWithRetry(client *api.RESTClient, method string, path string, bo
 	return nil, fmt.Errorf("failed to get response after retries")
 }
 
+// getReposForSecurityConfiguration returns a list of repository names attached to a specific security configuration.
+func getReposForSecurityConfiguration(client *api.RESTClient, org string, configID string) ([]string, error) {
+	var repos []string
+
+	path := fmt.Sprintf("orgs/%s/code-security/configurations/%s/repositories", org, configID)
+	for path != "" {
+		response, err := makeRequestWithRetry(client, "GET", path, nil)
+		if err != nil {
+			return nil, err
+		}
+
+		if response.StatusCode != 200 {
+			response.Body.Close()
+			return nil, fmt.Errorf("unexpected status code: %d", response.StatusCode)
+		}
+
+		var repoList []struct {
+			Repository struct {
+				Name string `json:"name"`
+			} `json:"repository"`
+		}
+
+		// Decode response body
+		if err := json.NewDecoder(response.Body).Decode(&repoList); err != nil {
+			response.Body.Close()
+			return nil, err
+		}
+
+		for _, item := range repoList {
+			repos = append(repos, item.Repository.Name)
+		}
+
+		// Check for next page in Link header before closing body
+		nextPath := ""
+		if linkHeader := response.Header.Get("Link"); linkHeader != "" {
+			nextPath = extractNextURL(linkHeader)
+		}
+
+		// Close the response body before next iteration
+		response.Body.Close()
+
+		// Set path for next iteration
+		path = nextPath
+	}
+
+	return repos, nil
+}
+
+// findSecurityConfigurationID finds the configuration ID by name.
+func findSecurityConfigurationID(client *api.RESTClient, org string, configName string) (string, error) {
+	path := fmt.Sprintf("orgs/%s/code-security/configurations?target_type=all", org)
+
+	for path != "" {
+		response, err := makeRequestWithRetry(client, "GET", path, nil)
+
+		if err != nil {
+			return "", err
+		}
+
+		if response.StatusCode != 200 {
+			response.Body.Close()
+			return "", fmt.Errorf("unexpected status code: %d", response.StatusCode)
+		}
+
+		var configs []struct {
+			ID   int    `json:"id"`
+			Name string `json:"name"`
+		}
+
+		if err := json.NewDecoder(response.Body).Decode(&configs); err != nil {
+			response.Body.Close()
+			return "", fmt.Errorf("failed to decode response: %w", err)
+		}
+
+		for _, config := range configs {
+			if strings.EqualFold(config.Name, configName) {
+				response.Body.Close()
+				return fmt.Sprintf("%d", config.ID), nil
+			}
+		}
+
+		// Check for next page in Link header before closing body
+		nextPath := ""
+		if linkHeader := response.Header.Get("Link"); linkHeader != "" {
+			nextPath = extractNextURL(linkHeader)
+		}
+
+		// Close the response body before next iteration
+		response.Body.Close()
+
+		// Set path for next iteration
+		path = nextPath
+	}
+
+	return "", fmt.Errorf("security configuration '%s' not found in organization '%s'", configName, org)
+}
+
 // listRepos returns a list of repository names under a given org.
-func ListRepos(client *api.RESTClient, org string) ([]string, error) {
+func ListRepos(client *api.RESTClient, org string, securityConfiguration string) ([]string, error) {
+	// If a security configuration is specified, filter by that configuration
+	if securityConfiguration != "" {
+		// Find the security configuration ID by name
+		configID, err := findSecurityConfigurationID(client, org, securityConfiguration)
+		if err != nil {
+			return nil, fmt.Errorf("failed to find security configuration '%s': %w", securityConfiguration, err)
+		}
+
+		// Get repositories for the security configuration
+		repos, err := getReposForSecurityConfiguration(client, org, configID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get repositories for security configuration: %w", err)
+		}
+		return repos, nil
+	}
+
 	perPage := 100
 	var repos []string
 	path := fmt.Sprintf("orgs/%s/repos?per_page=%d", org, perPage)

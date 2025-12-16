@@ -9,8 +9,9 @@ import (
 
 // Holds flags for organizations and repository.
 var (
-	Organizations string
-	Repository    string
+	Organizations         string
+	Repository            string
+	SecurityConfiguration string // Security configuration name to filter repos
 	CSVOutput     string // File path for CSV output
 	SkipArchived  bool   // Skip archived repositories
 	SkipForks     bool   // Skip forked repositories
@@ -47,6 +48,12 @@ func init() {
 		"",
 		"File path to output CSV report",
 	)
+	rootCmd.PersistentFlags().StringVar(
+    &SecurityConfiguration, 
+    "security-configuration",
+    "",
+    "Filter repositories by security configuration name",
+  )
 	rootCmd.PersistentFlags().BoolVar(
 		&SkipArchived,
 		"skip-archived",

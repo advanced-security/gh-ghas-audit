@@ -121,7 +121,7 @@ func runCodeScanningAudit(c *cobra.Command, args []string) {
 		for _, org := range orgs {
 			org = strings.TrimSpace(org)
 			fmt.Println("Processing organization:", org)
-			repos, err := ListRepos(client, org)
+			repos, err := ListRepos(client, org, SecurityConfiguration)
 			if err != nil {
 				fmt.Println("Error listing repos for", org+":", err)
 				return

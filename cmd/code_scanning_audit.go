@@ -92,6 +92,15 @@ func runCodeScanningAudit(c *cobra.Command, args []string) {
 			return
 		}
 		printer = csvPrinter
+		// Ensure CSV file is closed on exit
+		defer func() {
+			if cp, ok := printer.(*CSVPrinter); ok {
+				cp.Writer.Flush()
+				if err := cp.File.Close(); err != nil {
+					fmt.Println("Error closing CSV file:", err)
+				}
+			}
+		}()
 	} else {
 		terminal := term.FromEnv()
 		termWidth, _, _ := terminal.Size()
@@ -109,6 +118,10 @@ func runCodeScanningAudit(c *cobra.Command, args []string) {
 
 		entry := processRepository(client, org, singleRepo)
 		report.Entries = append(report.Entries, entry)
+
+		if err := printer.PrintEntry(&entry); err != nil {
+			fmt.Println("Error writing entry:", err)
+		}
 	} else {
 		// Otherwise, handle multiple organizations
 		orgs := strings.Split(Organizations, ",")
@@ -131,6 +144,11 @@ func runCodeScanningAudit(c *cobra.Command, args []string) {
 				fmt.Printf(" - Processing repository: %s [%d/%d]\n", repo, i+1, len(repos))
 				entry := processRepository(client, org, repo)
 				report.Entries = append(report.Entries, entry)
+
+				// Write entry incrementally
+				if err := printer.PrintEntry(&entry); err != nil {
+					fmt.Printf("Error writing entry for %s/%s: %v\n", org, repo, err)
+				}
 			}
 			fmt.Println("Finished processing organization:", org)
 		}

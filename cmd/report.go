@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"encoding/csv"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -65,6 +66,12 @@ func NewCSVPrinter(filePath string) (*CSVPrinter, error) {
 		return nil, fmt.Errorf("error writing CSV header: %w", err)
 	}
 	writer.Flush()
+	if err := writer.Error(); err != nil {
+		if closeErr := file.Close(); closeErr != nil {
+			return nil, fmt.Errorf("error writing CSV header: %w", errors.Join(err, closeErr))
+		}
+		return nil, fmt.Errorf("error writing CSV header: %w", err)
+	}
 
 	return &CSVPrinter{
 		Writer: writer,
@@ -116,10 +123,10 @@ func (cp *CSVPrinter) PrintEntry(entry *ReportEntry) error {
 	return cp.Writer.Error()
 }
 
-// PrintReport flushes the CSV writer and closes the file.
+// PrintReport flushes the CSV writer.
 func (cp *CSVPrinter) PrintReport(report *Report) error {
 	cp.Writer.Flush()
-	return cp.File.Close()
+	return cp.Writer.Error()
 }
 
 // wrapColorFunc wraps a color function to match the expected type.

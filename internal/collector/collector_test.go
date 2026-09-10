@@ -240,12 +240,30 @@ func codeqlWorkflows() workflowList {
 }
 
 func runList(conclusion string, age time.Duration) workflowRunList {
+	return runListFor(codeqlWorkflowPath, conclusion, age)
+}
+
+// advancedWorkflows builds a workflow list for a repository-controlled CodeQL
+// workflow, which has no fixed path.
+func advancedWorkflows(path string) workflowList {
+	return workflowList{
+		TotalCount: 1,
+		Workflows: []struct {
+			ID    int64  `json:"id"`
+			Name  string `json:"name"`
+			Path  string `json:"path"`
+			State string `json:"state"`
+		}{{ID: 99, Name: "CodeQL Advanced", Path: path, State: "active"}},
+	}
+}
+
+func runListFor(path, conclusion string, age time.Duration) workflowRunList {
 	moment := time.Now().Add(-age)
 	return workflowRunList{
 		TotalCount: 1,
 		WorkflowRun: []workflowRun{{
 			ID:           1234,
-			Path:         codeqlWorkflowPath,
+			Path:         path,
 			Status:       "completed",
 			Conclusion:   conclusion,
 			Event:        "dynamic",

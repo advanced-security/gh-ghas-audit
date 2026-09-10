@@ -64,6 +64,9 @@ const (
 	ExecNoCompletedRun ExecutionStatus = "no-completed-run"
 	// ExecNotApplicable means execution was not evaluated.
 	ExecNotApplicable ExecutionStatus = "not-applicable"
+	// ExecNotEvaluated means execution evidence was deliberately not gathered,
+	// because the scan depth did not ask for it.
+	ExecNotEvaluated ExecutionStatus = "not-evaluated"
 	// ExecUnknown means execution could not be determined.
 	ExecUnknown ExecutionStatus = "unknown"
 )
@@ -81,6 +84,9 @@ const (
 	FreshNever FreshnessStatus = "never-scanned"
 	// FreshNotApplicable means freshness was not evaluated.
 	FreshNotApplicable FreshnessStatus = "not-applicable"
+	// FreshNotEvaluated means freshness evidence was deliberately not
+	// gathered, because the scan depth did not ask for it.
+	FreshNotEvaluated FreshnessStatus = "not-evaluated"
 	// FreshUnknown means freshness could not be determined.
 	FreshUnknown FreshnessStatus = "unknown"
 )
@@ -279,19 +285,33 @@ func staleReason(status *Status) string {
 	return "no successful analysis within " + threshold
 }
 
+// IsScanning reports whether a configuration status means CodeQL is actually
+// set up to run, by either mechanism. Advanced setup counts: it is evaluated
+// like default setup, so it must be presented like it too.
+func IsScanning(status ConfigurationStatus) bool {
+	switch status {
+	case ConfigConfigured, ConfigAttachFailed, ConfigAdvancedSetup:
+		return true
+	default:
+		return false
+	}
+}
+
+// setupNoun names the mechanism doing the scanning, so a message about an
+// advanced setup repository does not blame default setup.
+func setupNoun(status *Status) string {
+	if status.Configuration == ConfigAdvancedSetup {
+		return "an advanced setup workflow"
+	}
+	return "default setup"
+}
+
 func classify(status *Status, hasWarning bool) (Severity, []string) {
 	var reasons []string
 
 	switch status.Configuration {
 	case ConfigUnavailable:
 		return SeverityUnavailable, []string{"code scanning configuration could not be read for this repository"}
-	case ConfigAdvancedSetup:
-		// CodeQL is running from a repository-controlled workflow. Reporting
-		// this as a rollout gap would be wrong, and reporting it as healthy
-		// would claim an assessment that was never made.
-		return SeverityUnknown, []string{
-			"code scanning runs from an advanced setup workflow, whose health this tool does not evaluate yet",
-		}
 	case ConfigNotConfigured:
 		// A repository with no analyzable code is not a rollout gap.
 		if status.Coverage == CoverageNoSupportedLanguages {
@@ -316,13 +336,13 @@ func classify(status *Status, hasWarning bool) (Severity, []string) {
 		// and reporting those as stalled would bury the real failures.
 		if status.Coverage == CoverageNoSupportedLanguages {
 			return SeverityNotApplicable, []string{
-				"default setup is configured but no CodeQL-supported languages were found to analyze",
+				setupNoun(status) + " is configured but no CodeQL-supported languages were found to analyze",
 			}
 		}
 		if status.Execution == ExecNoWorkflow {
-			reasons = append(reasons, "default setup is configured but no managed CodeQL workflow exists")
+			reasons = append(reasons, setupNoun(status)+" is configured but no CodeQL workflow exists")
 		} else {
-			reasons = append(reasons, "default setup is configured but no analysis run has ever completed")
+			reasons = append(reasons, setupNoun(status)+" is configured but no analysis run has ever completed")
 		}
 		return SeverityStalled, reasons
 	}
@@ -330,7 +350,7 @@ func classify(status *Status, hasWarning bool) (Severity, []string) {
 	if status.Freshness == FreshNever {
 		if status.Coverage == CoverageNoSupportedLanguages {
 			return SeverityNotApplicable, []string{
-				"default setup is configured but no CodeQL-supported languages were found to analyze",
+				setupNoun(status) + " is configured but no CodeQL-supported languages were found to analyze",
 			}
 		}
 		return SeverityStalled, []string{"no successful analysis evidence found"}
@@ -356,6 +376,14 @@ func classify(status *Status, hasWarning bool) (Severity, []string) {
 
 	if ExecutionRunning(status.Execution) {
 		return SeverityInProgress, []string{"an analysis run is currently executing"}
+	}
+
+	// Configuration-only depth gathers no runtime evidence, so a repository
+	// can be reported as configured and gap-free but never as healthy.
+	if status.Execution == ExecNotEvaluated {
+		return SeverityUnknown, []string{
+			"only configuration was read at this scan depth, so scan health was not evaluated",
+		}
 	}
 
 	if status.Execution == ExecSuccess {

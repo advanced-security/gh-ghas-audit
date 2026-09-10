@@ -1,23 +1,16 @@
 # gh-ghas-audit GitHub CLI extension
 
-`gh-ghas-audit` is a [GitHub CLI][gh-cli] extension that reports the health of
-GitHub code scanning across organizations and enterprises.
+A [GitHub CLI][gh-cli] extension reporting code scanning health across organizations and enterprises.
 
-Security teams can enable CodeQL default setup at scale, but once it is enabled
-there is no organization-level view of whether scans are actually succeeding. A
-repository can show as protected in the coverage view while its analysis
-silently fails, never runs, stops running, or skips a language. Today the only
-way to find those repositories is to open each one in turn.
-
-This extension answers those questions from the command line, in a form you can
-export, schedule, and hand to an auditor.
+Default setup can be enabled at scale, but there is no org-level view of whether scans actually succeed. A repository can look protected while its analysis silently fails, never runs, stops running, or skips a language.
 
 ## Contents
 
 - [What it reports](#what-it-reports)
 - [Installation](#installation)
 - [Quick start](#quick-start)
-- [Understanding the status dimensions](#understanding-the-status-dimensions)
+- [Scan depth](#scan-depth)
+- [Status dimensions](#status-dimensions)
 - [Filtering and grouping](#filtering-and-grouping)
 - [Output formats](#output-formats)
 - [Scheduled reporting](#scheduled-reporting)
@@ -25,31 +18,21 @@ export, schedule, and hand to an auditor.
 - [Performance and rate limits](#performance-and-rate-limits)
 - [Deep diagnostics](#deep-diagnostics)
 - [Known limitations](#known-limitations)
+- [Upgrading from 1.x](#upgrading-from-1x)
 - [Legacy command](#legacy-command)
 
 ## What it reports
 
-For every repository in scope:
+Per repository in scope:
 
-- Whether code scanning default setup is configured.
-- Whether an organization or enterprise security configuration attached
-  successfully, including rollouts that **failed to attach**.
-- Whether the most recent analysis run succeeded, failed, timed out, is still
-  running, or has **never completed at all**.
-- Whether the managed CodeQL workflow is **disabled**, which stops scheduled
-  scans. GitHub disables workflows automatically after a period of repository
-  inactivity, so this happens without anyone changing a setting.
-- **When the repository last scanned successfully**, and whether that is within
-  your freshness threshold.
-- **Which languages are actually being analyzed**, compared against the
-  languages present in the repository and the languages default setup claims to
-  cover.
-- **Languages silently dropped from default setup.** When a language's
-  analysis fails, GitHub clears its checkbox and it is never scanned again.
-  Nothing else in the product surfaces that.
-- Languages present that CodeQL **cannot** analyze at all, such as Scala, so
-  you know where CodeQL alone does not provide coverage.
-- Direct links to the workflow run and the per-language job, as evidence.
+- Default setup configured, and whether a security configuration **failed to attach**.
+- Whether the latest run succeeded, failed, is running, or **never completed**.
+- Whether the managed CodeQL workflow is **disabled** (GitHub does this automatically after inactivity).
+- **When it last scanned successfully**, against a freshness threshold.
+- **Which languages are actually analyzed**, versus present in the repository and versus configured.
+- **Languages silently dropped from default setup** after a failed analysis. Nothing else in the product surfaces this.
+- Languages CodeQL **cannot** analyze, such as Scala.
+- Links to the run and per-language job as evidence.
 
 ## Installation
 
@@ -57,21 +40,19 @@ For every repository in scope:
 gh extension install advanced-security/gh-ghas-audit
 ```
 
-To build from source:
+From source:
 
 ```bash
 git clone https://github.com/advanced-security/gh-ghas-audit.git
-cd gh-ghas-audit
-go build -o gh-ghas-audit .
-gh extension install .
+cd gh-ghas-audit && go build -o gh-ghas-audit . && gh extension install .
 ```
 
 ## Quick start
 
-Report one organization:
-
 ```bash
 gh ghas-audit code-scanning status --organization my-org
+gh ghas-audit code-scanning status --enterprise my-enterprise
+gh ghas-audit code-scanning status -o my-org --status failing,stalled,stale --detailed
 ```
 
 ```text
@@ -94,66 +75,60 @@ degraded  my-org/web         configured  success      2 days ago    1/2 (not con
 healthy   my-org/identity    configured  success      1 day ago     3/3
 ```
 
-Report an entire enterprise:
+## Scan depth
+
+`--scan-depth` selects how much evidence is gathered. Each level adds a kind of
+evidence and closes a specific blind spot, so it is a scope control, not a
+quality dial.
+
+| Depth | Adds | Cost per repository | Blind spot |
+| --- | --- | --- | --- |
+| `config` | default setup and repository languages | ~2 requests | no runtime evidence, so it never reports `healthy` |
+| `health` (default) | workflows, runs, jobs, analyses, CodeQL databases | ~5 requests | cannot see log-only warnings |
+| `diagnostics` | Actions log parsing | megabytes, uncached | best effort; depends on log retention |
 
 ```bash
-gh ghas-audit code-scanning status --enterprise my-enterprise
+gh ghas-audit code-scanning status -o my-org --scan-depth config
+gh ghas-audit code-scanning status -o my-org
+gh ghas-audit code-scanning status -o my-org --scan-depth diagnostics
 ```
 
-Show only what needs attention, with an explanation for each row:
+`config` answers the rollout question cheaply: which supported languages are
+not configured for analysis. Because it reads no runtime evidence it reports
+`unknown` rather than `healthy`, and it cannot recognize advanced setup.
 
-```bash
-gh ghas-audit code-scanning status --organization my-org \
-  --status failing,stalled,stale,degraded --detailed
-```
+`low`, `medium` and `high` are accepted as aliases.
 
-## Understanding the status dimensions
+## Status dimensions
 
-A single pass or fail hides the problems that matter, so every repository is
-reported across four independent dimensions.
+Every repository is reported across four independent dimensions.
 
-| Dimension | Values | Question it answers |
+| Dimension | Values | Question |
 | --- | --- | --- |
-| `configuration` | `configured`, `not-configured`, `advanced-setup`, `attaching`, `updating`, `attach-failed`, `unavailable` | Is code scanning set up, and did the security configuration attach? |
-| `execution` | `success`, `failure`, `timed-out`, `cancelled`, `action-required`, `startup-failure`, `in-progress`, `queued`, `no-workflow`, `no-completed-run` | Did the most recent analysis run succeed, fail, or never run? |
-| `freshness` | `current`, `stale`, `never-scanned` | How long ago did this repository last scan successfully, against the threshold for its scan schedule? |
-| `coverage` | `complete`, `partial`, `gap`, `no-supported-languages` | Are all supported languages actually being analyzed? |
+| `configuration` | `configured`, `not-configured`, `advanced-setup`, `attaching`, `updating`, `attach-failed`, `unavailable` | Is it set up, and did the security configuration attach? |
+| `execution` | `success`, `failure`, `timed-out`, `cancelled`, `action-required`, `startup-failure`, `in-progress`, `queued`, `no-workflow`, `no-completed-run` | Did the latest run succeed, fail, or never run? |
+| `freshness` | `current`, `stale`, `never-scanned` | How long since it last scanned successfully? |
+| `coverage` | `complete`, `partial`, `gap`, `no-supported-languages` | Are all supported languages analyzed? |
 
-Those four roll up into one `overall` severity, used for sorting and summary
-counts, with a fixed precedence:
+These roll up into one `overall` severity, in precedence order:
 
 | Severity | Meaning |
 | --- | --- |
-| `failing` | The most recent analysis run failed, timed out, or was cancelled. |
-| `stalled` | Scanning is configured but is not running: no managed workflow, no completed run, or the security configuration failed to attach. |
-| `stale` | Scanning succeeded, but not within the freshness threshold. |
-| `degraded` | Scanning succeeded, but a language is not analyzed, a language is not configured, or a warning was found. |
-| `in-progress` | A run is currently executing, or a configuration is still attaching. |
-| `healthy` | Configured, current, and fully covered. |
-| `not-configured` | Code scanning is not enabled, and the repository contains code CodeQL could analyze. |
-| `not-applicable` | Nothing in the repository can be analyzed by CodeQL. |
-| `unavailable` | The repository could not be inspected, usually because code security is not enabled for it. |
+| `failing` | Latest run failed, timed out, or was cancelled. |
+| `stalled` | Configured but not running: no workflow, no completed run, or attachment failed. |
+| `stale` | Succeeded, but not within the freshness threshold. |
+| `degraded` | Succeeded, but a language is unanalyzed or unconfigured, or a warning was found. |
+| `in-progress` | A run is executing, or a configuration is attaching. |
+| `healthy` | Configured, current, fully covered. |
+| `not-configured` | Not enabled, and CodeQL-analyzable code is present. |
+| `not-applicable` | Nothing CodeQL can analyze. |
+| `unavailable` | Could not be inspected, usually code security not enabled. |
 
-Two distinctions are deliberate and matter in practice:
-
-- **`stalled` is not `failing`.** A repository whose default setup is
-  configured but which has never produced a completed run looks protected in
-  coverage views and green in Actions, because there is nothing to be red. It
-  is reported separately because it is otherwise invisible.
-- **`not-applicable` is not `not-configured`.** An empty repository, or one
-  containing only HTML and CSS, keeps default setup "configured" forever.
-  Reporting those as broken would bury the genuine failures.
+`stalled` is separated from `failing` because a configured repository with no completed run looks green everywhere else. `not-applicable` is separated from `not-configured` so empty repositories do not bury real failures.
 
 ### Languages dropped after a failed analysis
 
-When a language's analysis fails, GitHub clears that language from the default
-setup configuration. It runs once, fails, and is never scanned again. The
-settings page and the API agree it is no longer configured, while the tool
-status page still shows its failed configuration, so the drop itself is
-invisible.
-
-The primary detection needs no run history. Repository languages are normalized
-onto CodeQL identifiers and compared against the configured languages:
+When a language's analysis fails, GitHub clears it from default setup and it is never scanned again. Repository languages are normalized onto CodeQL identifiers and compared with configured languages:
 
 | Repository contains | Normalizes to | Configured | Result |
 | --- | --- | --- | --- |
@@ -161,110 +136,66 @@ onto CodeQL identifiers and compared against the configured languages:
 | TypeScript | `javascript-typescript` | `javascript-typescript` | covered |
 | Scala | not supported | n/a | CodeQL cannot analyze it |
 
-Where the latest run also contains an analysis job for a language that is no
-longer configured, it was enabled until recently, which separates two cases
-that need different fixes:
-
 | Evidence | Reported as | Fix |
 | --- | --- | --- |
 | Detected, not configured, no analysis job | `language-not-configured` (warning) | Enable the language |
 | Detected, not configured, failed analysis job | `language-auto-deselected` (error) | Re-enable it **and** fix the failure |
 
-Both appear in `missing_languages`; the dropped ones also appear in
-`deselected_languages` and in the `Languages dropped after failing` CSV column.
+Both appear in `missing_languages`; dropped ones also in `deselected_languages` and the `Languages dropped after failing` CSV column.
 
 ## Filtering and grouping
 
-Scope:
-
-| Flag | Purpose |
+| Scope flag | Purpose |
 | --- | --- |
 | `--organization`, `-o` | One or more organizations, comma separated. |
 | `--enterprise`, `-e` | Every organization in an enterprise. |
 | `--repository`, `-r` | A single `OWNER/REPO`. |
 
-Narrowing:
-
-| Flag | Purpose |
+| Narrowing flag | Purpose |
 | --- | --- |
-| `--status` | Only report these overall statuses. |
-| `--language` | Only report repositories involving these CodeQL languages. |
-| `--visibility` | Only scan `public`, `private` or `internal` repositories. |
-| `--match`, `--exclude` | Glob patterns on repository name, for example `--match 'team-*'`. |
+| `--status` | Only these overall statuses. |
+| `--language` | Only repositories involving these CodeQL languages. |
+| `--visibility` | Only `public`, `private` or `internal`. |
+| `--match`, `--exclude` | Glob patterns on repository name. |
 | `--skip-archived`, `--skip-forks` | Exclude archived or forked repositories. |
-| `--security-configuration` | Only repositories attached to a named security configuration. |
-| `--property-filter` | Only repositories whose custom property matches, as `NAME=VALUE`. |
-| `--activity` | Only `active` or `inactive` repositories. |
-| `--stale-after` | Freshness threshold for active repositories, default `8d`. |
-| `--stale-after-inactive` | Freshness threshold for inactive repositories, default `32d`. |
-| `--inactive-after` | Time without a push that makes a repository inactive, default `180d`. |
+| `--security-configuration` | Only repositories attached to a named configuration. |
+| `--property-filter` | Custom property match, as `NAME=VALUE`. |
+| `--activity` | Only `active` or `inactive`. |
+| `--stale-after` | Freshness threshold, active repositories. Default `8d`. |
+| `--stale-after-inactive` | Freshness threshold, inactive repositories. Default `32d`. |
+| `--inactive-after` | Time without a push that marks a repository inactive. Default `180d`. |
 
-`--match`, `--exclude`, `--visibility` and `--property-filter` are applied
-before any per-repository request, so excluded repositories cost nothing.
+`--match`, `--exclude`, `--visibility` and `--property-filter` apply before any per-repository request, so excluded repositories cost nothing.
 
-### Freshness thresholds and repository activity
+### Freshness and activity
 
-GitHub scans default setup repositories weekly, **except** repositories with no
-pushes or pull requests for six months or more. When an organization enables
-*Keep scheduled scans running every 30 days for inactive repositories*, those
-are scanned monthly instead
-([changelog](https://github.blog/changelog/2026-06-09-periodic-code-scanning-of-inactive-repositories/)).
-
-Holding a monthly-scanned repository to a weekly threshold would report it as
-stale for 23 days out of every 30, so two thresholds are applied:
+GitHub scans weekly, except repositories with no pushes or pull requests for six months, which scan monthly when the organization enables that setting ([changelog](https://github.blog/changelog/2026-06-09-periodic-code-scanning-of-inactive-repositories/)). Two thresholds are therefore applied:
 
 | Flag | Default | Applies to |
 | --- | --- | --- |
-| `--stale-after` | `8d` | Active repositories (weekly schedule plus a day of tolerance) |
-| `--stale-after-inactive` | `32d` | Inactive repositories (monthly schedule plus tolerance) |
-| `--inactive-after` | `180d` | Time without a push after which a repository counts as inactive |
+| `--stale-after` | `8d` | Active repositories |
+| `--stale-after-inactive` | `32d` | Inactive repositories |
+| `--inactive-after` | `180d` | Push age that marks a repository inactive |
 
-Each repository reports which threshold was applied, so a stale verdict always
-explains itself:
+Each row reports which threshold was applied:
 
 ```text
 HEALTH  REPOSITORY   LAST SCAN               DETAIL
-stale   org/Infinity 204 days ago (inactive) no successful analysis within 32d (inactive); this
-                                             repository has had no recent pushes, so GitHub scans
-                                             it monthly at most
+stale   org/Infinity 204 days ago (inactive) no successful analysis within 32d (inactive)
 stale   org/Web      20 days ago             no successful analysis within 8d
 ```
 
-Filter to one population with `--activity`:
-
 ```bash
-# Actively developed repositories that are not being scanned. Usually the
-# most urgent, because the code is changing.
 gh ghas-audit code-scanning status -o my-org --activity active --status stale,failing,stalled
-
-# Dormant repositories that have fallen out of the monthly cycle.
 gh ghas-audit code-scanning status -o my-org --activity inactive --status stale
 ```
 
-If your organization has **not** enabled monthly scanning of inactive
-repositories, those repositories stop being scanned altogether and will be
-reported stale. That is the correct result: an unscanned repository is
-unscanned regardless of why, and the remedy is either to enable the setting or
-to archive the repository. Archived repositories are excluded with
-`--skip-archived`.
-
-Two caveats worth knowing. Activity is inferred from the repository push
-timestamp, which is the closest public signal to GitHub's own "no pushes or
-pull requests" rule; they agree in practice, because opening a pull request
-requires pushing a branch, but this is an approximation. And the organization
-setting itself is not exposed by any API, so the tool cannot detect whether
-monthly scanning is switched on; `--stale-after-inactive` is simply the
-threshold it applies.
+Activity is inferred from push and pull request timestamps, an approximation of GitHub's own rule. The organization's monthly-scanning setting is not exposed by any API, so `--stale-after-inactive` is simply the threshold applied.
 
 ### Grouping by application
 
-Most organizations map repositories to applications using custom properties.
-`--group-by-property` aggregates the summary by that property, turning a
-repository list into an application-level view:
-
 ```bash
-gh ghas-audit code-scanning status --organization my-org \
-  --group-by-property application
+gh ghas-audit code-scanning status -o my-org --group-by-property application
 ```
 
 ```text
@@ -274,33 +205,17 @@ By application
   (not set)                        11 repositories, 2 needing attention
 ```
 
-Repositories with no value are grouped under `(not set)`, which also shows how
-complete your property data is.
-
-Property names are matched case-insensitively, so `--group-by-property project`
-finds a property the organization defined as `Project`. Multi-select properties
-match on any one of their values, so `--property-filter Project=Internal`
-selects a repository whose `Project` is `INFINITY, Internal`.
-
-### Freshness threshold
-
-See [Freshness thresholds and repository activity](#freshness-thresholds-and-repository-activity)
-above. In short, active repositories are held to `--stale-after` (default
-`8d`) and inactive ones to `--stale-after-inactive` (default `32d`):
-
-```bash
-gh ghas-audit code-scanning status --organization my-org --stale-after 14d
-```
+Property names match case-insensitively (`project` finds `Project`). Multi-select properties match on any value, so `--property-filter Project=Internal` selects a repository whose `Project` is `INFINITY, Internal`.
 
 ## Output formats
 
 | Format | Use |
 | --- | --- |
 | `table` | Terminal review. Add `--detailed` for an explanation column. |
-| `json` | The complete, versioned report. This is the canonical data contract. |
-| `ndjson` | One header record plus one record per repository, for very large estates and streaming pipelines. |
+| `json` | Complete versioned report. The canonical data contract. |
+| `ndjson` | Header record plus one record per repository, for streaming. |
 | `csv` | One row per repository. |
-| `language-csv` | One row per repository language, for per-language coverage questions. |
+| `language-csv` | One row per repository language. |
 
 ```bash
 gh ghas-audit code-scanning status -o my-org --format csv --output status.csv
@@ -308,10 +223,7 @@ gh ghas-audit code-scanning status -o my-org --format language-csv --output lang
 gh ghas-audit code-scanning status -o my-org --format json --output status.json
 ```
 
-The JSON document carries `schema_version`, the scope and settings used, the
-summary, per-repository status and evidence, collection warnings, and request
-statistics. Check `schema_version` before parsing, and check `stats.incomplete`
-before treating the report as authoritative:
+Check `schema_version` before parsing and `stats.incomplete` before trusting the result:
 
 ```bash
 jq -r '.repositories[] | select(.status.overall == "stalled") | .full_name' status.json
@@ -319,13 +231,13 @@ jq '.summary.by_severity' status.json
 jq '.stats.incomplete' status.json
 ```
 
-### Exit codes for automation
+### Exit codes
 
 | Code | Meaning |
 | --- | --- |
-| `0` | The scan completed and nothing matched `--fail-on`. |
+| `0` | Completed, nothing matched `--fail-on`. |
 | `1` | The tool failed. |
-| `2` | The scan completed and `--fail-on` matched. |
+| `2` | Completed and `--fail-on` matched. |
 
 ```bash
 gh ghas-audit code-scanning status -o my-org --fail-on failing,stalled
@@ -333,114 +245,62 @@ gh ghas-audit code-scanning status -o my-org --fail-on failing,stalled
 
 ## Scheduled reporting
 
-The extension is not packaged as a GitHub Action. Peer extensions in this
-organization are not either, and wrapping a CLI in an Action would create a
-second implementation and a second data contract to keep in step. Instead,
-install the released extension in a workflow and invoke it.
-
-A complete scheduled workflow, including GitHub App authentication, cache
-reuse, a job summary and artifact upload, is in
-[`examples/code-scanning-status.yml`](examples/code-scanning-status.yml).
+Install the released extension in a workflow and invoke it; it is not packaged as an Action. A complete scheduled workflow with GitHub App auth, cache reuse, job summary and artifact upload is in [`examples/code-scanning-status.yml`](examples/code-scanning-status.yml).
 
 ## Permissions
 
-The token must be able to read every repository you want reported. Missing
-permissions produce `unavailable` rows rather than silent omissions, and set
-`stats.incomplete`.
+Missing permissions produce `unavailable` rows rather than silent omissions, and set `stats.incomplete`.
 
 | Capability | Requirement |
 | --- | --- |
 | Repository inventory and languages | Repository `Metadata: read` |
 | Default setup and CodeQL databases | Repository `Code scanning alerts: read` |
 | Workflow runs and jobs | Repository `Actions: read` |
-| Security configurations and attachment status | Organization `Administration: read` |
+| Security configurations and attachment | Organization `Administration: read` |
 | Custom properties | Organization `Custom properties: read` |
-| `--enterprise` discovery | A token with the `read:enterprise` scope |
+| `--enterprise` discovery | Token with `read:enterprise` |
 
-`--enterprise` uses GraphQL, which needs an enterprise-scoped token. GitHub App
-installation tokens are scoped to a single organization and cannot list an
-enterprise, so either run once per organization or use a scoped personal access
-token. If the scope is missing, the tool says so and suggests
-`gh auth refresh -h github.com -s read:enterprise`.
-
-The Actions `GITHUB_TOKEN` is scoped to its own repository and cannot inventory
-an organization.
+GitHub App installation tokens are scoped to one organization and cannot list an enterprise; run once per organization or use a scoped PAT. The Actions `GITHUB_TOKEN` cannot inventory an organization.
 
 ## Performance and rate limits
 
-A configured repository costs roughly five REST requests: default setup,
-workflow list, workflow runs, run jobs, and CodeQL databases. Repository
-inventory and languages come from GraphQL, one query per 50 repositories, which
-avoids a per-repository languages request.
+A configured repository costs roughly five REST requests. Inventory and languages come from GraphQL, one query per 50 repositories. Unconfigured repositories cost one request; filtered-out repositories cost nothing.
 
-Repositories that are not configured cost one request, and repositories
-excluded by a filter cost nothing.
-
-Measured against a real eight-organization enterprise of 35 repositories:
+Measured against an eight-organization enterprise of 35 repositories:
 
 | Run | REST requests | 304 cache hits | Rate limit consumed |
 | --- | --- | --- | --- |
 | Cold | 145 | 0 | 145 |
 | Warm, same cache | 145 | 137 | 9 |
 
-Conditional requests are the main scaling lever. GitHub does not count `304 Not
-Modified` responses against the primary rate limit, so a repeated scan of an
-unchanged estate costs almost nothing in quota. Note that a warm run is not
-much faster in wall clock time, because each request is still a round trip; the
-saving is quota, which is what constrains large estates.
+`304 Not Modified` does not count against the primary rate limit, so repeat scans cost almost nothing in quota. A warm run is not much faster in wall clock time; the saving is quota.
 
-Cached responses are written straight to disk rather than held in memory, so
-memory use stays flat regardless of how many repositories are scanned. Use
-`--cache-max-age` to have old entries pruned automatically.
+- Use a **GitHub App installation token** for large estates: higher limit, per-installation budget.
+- Keep `--concurrency` moderate. The default of 8 is well below GitHub's ceiling; raising it risks secondary rate limits.
+- Use `--cache-dir` on every run; `--refresh` only to discard deliberately.
+- Narrow with `--match`, `--exclude` or `--property-filter`.
 
-Guidance for large estates:
-
-- Use a **GitHub App installation token**. It receives a higher primary rate
-  limit than a personal access token, and each organization installation has
-  its own budget.
-- Keep `--concurrency` moderate. The default of 8 is deliberately well below
-  GitHub's concurrency ceiling; raising it increases the risk of secondary rate
-  limits, which cost more time than they save.
-- Use `--cache-dir` on every run, and `--refresh` only when you deliberately
-  want to discard cached responses.
-- Narrow with `--match`, `--exclude` or `--property-filter` when you only care
-  about part of the estate.
-
-Primary and secondary rate limits are handled automatically: the tool honours
-`Retry-After` and rate limit reset headers and backs off with jitter. Waits are
-reported in `stats.rate_limit_waits`.
+Primary and secondary rate limits are handled automatically, honouring `Retry-After` with jittered backoff. Waits appear in `stats.rate_limit_waits`.
 
 ## Deep diagnostics
 
-`--deep-diagnostics` downloads and parses Actions logs to recover warning text
-that no API exposes, such as dependency extraction failures or an unreachable
-package registry.
+At `--scan-depth diagnostics` the tool parses Actions logs for warning text no
+API exposes.
 
 ```bash
-# Only inspect repositories that already look unhealthy.
-gh ghas-audit code-scanning status -o my-org --deep-diagnostics problematic
-
-# Also inspect healthy repositories. This is the only mode that can find a
-# warning hidden behind a completely green workflow run.
-gh ghas-audit code-scanning status -o my-org --deep-diagnostics all
+gh ghas-audit code-scanning status -o my-org --scan-depth diagnostics
+gh ghas-audit code-scanning status -o my-org --scan-depth diagnostics --deep-scope problematic
 ```
 
-Understand the trade-offs before enabling it:
+`--deep-scope` defaults to `all`. `problematic` inspects only repositories that
+already look unhealthy, which is cheaper but can only explain a failure, never
+discover one: a warning behind a green run is invisible to it.
 
-- **It is slow and rate limit heavy.** Each inspected repository downloads a
-  full log archive, far larger than any API response. Use a GitHub App
-  installation token rather than a personal access token.
-- **It is best effort.** Log text is unstructured and can change without
-  notice. Findings are labelled `"source": "log"` in the output and are never
-  presented as authoritative tool status.
-- **It is bounded.** `--deep-diagnostics-max-repos` (default 200) and
-  `--deep-diagnostics-max-mb` (default 32) cap the work. When a limit is
-  reached, inspection stops rather than running unbounded.
+- **Slow and rate limit heavy.** Each repository downloads a full log archive. Use an App installation token.
+- **Best effort.** Findings are labelled `"source": "log"` and never presented as authoritative.
+- **Bounded.** `--deep-diagnostics-max-repos` (default 200) and `--deep-diagnostics-max-mb` (default 32).
 
-Only genuine CodeQL diagnostics and Actions annotations are considered.
-
-The most useful signal is the diagnostic blocks CodeQL writes to the log, which
-are the same entries the repository tool status page displays:
+It parses the CodeQL diagnostic blocks the repository tool status page displays:
 
 ```text
 ##[group]Low C# analysis quality (1 result)
@@ -448,66 +308,52 @@ are the same entries the repository tool status page displays:
 ##[endgroup]
 ```
 
-Parsing those reproduces the status page rather than guessing from log text,
-including the metrics and thresholds it quotes. Severity follows how GitHub
-presents each entry, so the report agrees with the page:
+Severity follows how the page presents each entry:
 
-| Status page | Reported as | Effect on status |
+| Status page | Reported as | Effect |
 | --- | --- | --- |
-| Error, for example a failed build or no analyzable code | `error` | Repository is failing or degraded |
-| Warning, for example low analysis quality or duplicate classes filtered out | `warning` | Repository is degraded |
-| Suggestion, for example build-mode `none` or private package registries | `info` | No effect |
+| Error, e.g. failed build or no analyzable code | `error` | Failing or degraded |
+| Warning, e.g. low analysis quality, duplicate classes | `warning` | Degraded |
+| Suggestion, e.g. build-mode `none`, private registries | `info` | None |
 
-The status page has three levels and takes the highest one, where a
-"suggestion" is the lowest level presented with a lightbulb rather than a
-separate tier. This report follows the same model, so `info` findings are
-recorded without changing a verdict.
-
-Anything unrecognized is recorded as `info` with its original text, so a new
-diagnostic is surfaced without turning a repository red on its own. Routine
-noise, such as action and Node.js deprecation notices, is filtered out, and
-analysis logs mention words like "warning" and "analysis quality" during
-entirely healthy runs, which is why raw text matching is not used.
-
-Verified against three repositories whose status pages are green, amber and
-red: they are reported as healthy, degraded and failing respectively.
+Unrecognized entries are recorded as `info` with their original text. Routine noise such as deprecation notices is filtered out.
 
 ## Known limitations
 
-These are limits of the public GitHub API, not of this tool. They are stated
-plainly so the report is not mistaken for something it cannot be.
+These are limits of the public GitHub API, not of this tool.
 
-- **No exact parity with the repository tool status page.** GitHub does not
-  expose that page through REST or GraphQL; several candidate endpoints return
-  404. With `--deep-diagnostics` the tool reconstructs most of it by parsing
-  the CodeQL diagnostic blocks in the Actions log, which is the same content
-  the page renders, but that depends on log format and log retention rather
-  than a supported interface. Without that flag, status is derived from
-  configuration, run, job and CodeQL database evidence only.
-- **Coverage is inferred, not declared.** Whether a language was analyzed is
-  derived from per-language jobs and CodeQL databases. A language configured in
-  default setup with no successful analysis is reported as not analyzed.
-- **`actions` cannot be detected from source.** It is never reported as an
-  unconfigured coverage gap, because there is no reliable way to verify it.
-- **Advanced setup is recognized but not evaluated.** A repository running
-  CodeQL from its own workflow reports `advanced-setup` with an `unknown`
-  status and the date of its last analysis, rather than being miscounted as a
-  rollout gap. Its scan health is not assessed yet. Third-party SARIF uploads
-  are not evaluated either.
-- **Enterprise scans need an enterprise-scoped token.** See
-  [Permissions](#permissions).
-- **There is no push notification.** GitHub has no code scanning specific
-  webhook for analysis degradation, so this is a pull-based report. Schedule it
-  rather than expecting an alert.
-- **A partial scan is marked, not hidden.** If any evidence could not be read,
-  that repository is never reported as `healthy`: its status carries
-  `incomplete`, the CSV `Evidence complete` column is `false`, and the reason
-  is recorded. At report level, `stats.incomplete` is `true` and warnings are
-  included. Absence of a problem in an incomplete report does not prove absence
-  of a problem.
-- **Rate limits are never reported as repository health.** A throttled request
-  is retried, and if the retry budget is exhausted it is recorded as a
-  collection error rather than as the repository being unreadable.
+- **No exact parity with the tool status page.** It has no REST or GraphQL endpoint. `--deep-diagnostics` reconstructs most of it from Actions logs, subject to log format and retention.
+- **Coverage is inferred**, from per-language jobs and CodeQL databases, not declared.
+- **`actions` cannot be detected from source**, so it is never reported as a coverage gap.
+- **Advanced setup coverage is inferred from analyses.** Which languages an advanced workflow intended to scan lives in its YAML and no API exposes it, so a language present but never analyzed is reported as not configured, exactly as for default setup. Third-party SARIF is not evaluated.
+- **`config` depth cannot recognize advanced setup**, because that needs the analyses endpoint.
+- **Enterprise scans need an enterprise-scoped token.** See [Permissions](#permissions).
+- **No push notification.** There is no webhook for analysis degradation; schedule this report.
+- **A partial scan is marked, not hidden.** Repositories with unread evidence are never `healthy`: status carries `incomplete`, the `Evidence complete` CSV column is `false`, and `stats.incomplete` is `true`.
+- **Rate limits are never reported as repository health.** Throttled requests are retried, then recorded as collection errors.
+
+## Upgrading from 1.x
+
+`code-scanning status` is new; the original `code-scanning` command still runs
+and its CSV is unchanged. Two things to know if you move a pipeline onto
+`status`:
+
+**The CSV schema is different.** The original has 6 columns, `status` has 40.
+Positional scripts (`cut -d, -f5`) will read the wrong field silently. Column
+mapping:
+
+| 1.x column | `status` equivalent | Value change |
+| --- | --- | --- |
+| `Default setup enabled?` | `Configuration status` | `Enabled`/`Disabled` → `configured`/`not-configured`/`advanced-setup`/`attach-failed`/`unavailable` |
+| `Languages in repo` | `Detected languages` | aliases folded, so `typescript` is no longer emitted next to `javascript-typescript` |
+| `Default setup configured` | `Configured languages` | only populated when default setup is actually configured |
+| `Not configured (supported languages)` | `Languages not configured` | now populated |
+
+**Gap counts will go up, and that is a fix rather than a regression in your
+estate.** The original command reads the default setup language list without
+checking whether default setup is on. For a repository with no code scanning
+that list is an eligibility list, so it cancels out the detected languages and
+the gap column comes back empty. `status` reports those gaps.
 
 ## Legacy command
 
@@ -517,13 +363,11 @@ The original language coverage audit is unchanged:
 gh ghas-audit code-scanning --organization my-org --csv-output audit.csv
 ```
 
-It reports detected languages against configured default setup languages. Use
-`code-scanning status` for scan health, freshness and per-language evidence.
+Use `code-scanning status` for scan health, freshness and per-language evidence.
 
 ## License
 
-This project is licensed under the terms of the MIT open source license. Please
-refer to [MIT][license] for the full terms.
+Licensed under the terms of the MIT open source license. See [MIT][license].
 
 ## Maintainers
 
@@ -532,8 +376,7 @@ refer to [MIT][license] for the full terms.
 
 ## Support
 
-Please create [GitHub Issues][github-issues] if there are bugs or feature
-requests.
+Please create [GitHub Issues][github-issues] for bugs or feature requests.
 
 <!-- Resources -->
 

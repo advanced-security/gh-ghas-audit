@@ -133,15 +133,21 @@ type codeqlDatabase struct {
 // endpoint. The error field names the language that failed without needing to
 // read Actions logs.
 type codeScanningAnalysis struct {
-	Category   string     `json:"category"`
-	Error      string     `json:"error"`
-	CreatedAt  *time.Time `json:"created_at"`
-	Results    int        `json:"results_count"`
-	Rules      int        `json:"rules_count"`
-	CommitSHA  string     `json:"commit_sha"`
-	Ref        string     `json:"ref"`
-	Deletable  bool       `json:"deletable"`
-	AnalysisID int64      `json:"id"`
+	Category string `json:"category"`
+	Error    string `json:"error"`
+	// AnalysisKey is "<workflow path>:<job name>". It is the only reliable
+	// link from an analysis back to the workflow that produced it, which is
+	// what makes advanced setup evaluable: the workflow has no fixed path and
+	// cannot be discovered by name.
+	AnalysisKey string     `json:"analysis_key"`
+	Environment string     `json:"environment"`
+	CreatedAt   *time.Time `json:"created_at"`
+	Results     int        `json:"results_count"`
+	Rules       int        `json:"rules_count"`
+	CommitSHA   string     `json:"commit_sha"`
+	Ref         string     `json:"ref"`
+	Deletable   bool       `json:"deletable"`
+	AnalysisID  int64      `json:"id"`
 }
 
 // securityConfiguration mirrors an org or enterprise code security

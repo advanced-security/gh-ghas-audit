@@ -218,6 +218,9 @@ var languageCSVHeader = []string{
 	"Succeeded",
 	"Job conclusion",
 	"Database updated",
+	"Last analysis",
+	"Results",
+	"Analysis error",
 	"Repository overall status",
 	"Job URL",
 }
@@ -254,6 +257,9 @@ func WriteLanguageCSV(writer io.Writer, report *model.Report, propertyColumns []
 				strconv.FormatBool(state.Succeeded),
 				state.JobConclusion,
 				formatTime(state.DatabaseUpdatedAt),
+				formatTime(state.AnalysisCreatedAt),
+				formatCount(state.ResultsCount),
+				state.AnalysisError,
 				string(repo.Status.Overall),
 				state.JobURL,
 			}
@@ -297,6 +303,15 @@ func formatTime(value *model.Timestamp) string {
 		return ""
 	}
 	return value.UTC().Format("2006-01-02T15:04:05Z")
+}
+
+// formatCount renders an optional count, distinguishing "zero results" from
+// "not measured", which matters when judging whether a language ran at all.
+func formatCount(value *int) string {
+	if value == nil {
+		return ""
+	}
+	return strconv.Itoa(*value)
 }
 
 func formatDays(value *int) string {

@@ -201,7 +201,12 @@ func executionCell(repo model.Repo) string {
 
 func lastScanCell(repo model.Repo) string {
 	if repo.LastSuccessfulScan == nil {
-		if repo.Status.Configuration == model.ConfigConfigured {
+		// Freshness was deliberately not measured, so "never" would assert
+		// something this scan never checked.
+		if repo.Status.Freshness == model.FreshNotEvaluated {
+			return "-"
+		}
+		if model.IsScanning(repo.Status.Configuration) {
 			return "never"
 		}
 		return "-"
@@ -232,7 +237,7 @@ func lastScanCell(repo model.Repo) string {
 // languageCell shows analyzed coverage as a fraction plus any problem
 // languages, so a repository missing one language stands out.
 func languageCell(repo model.Repo) string {
-	if repo.Status.Configuration != model.ConfigConfigured && repo.Status.Configuration != model.ConfigAttachFailed {
+	if !model.IsScanning(repo.Status.Configuration) {
 		if len(repo.DetectedLanguages) == 0 {
 			return "-"
 		}
@@ -242,6 +247,16 @@ func languageCell(repo model.Repo) string {
 	configured := len(repo.ConfiguredLanguages)
 	if configured == 0 && len(repo.DetectedLanguages) == 0 {
 		return "-"
+	}
+
+	// Without runtime evidence there is no analyzed count, and rendering
+	// "0/6" would read as six failures rather than six unmeasured languages.
+	if repo.Status.Execution == model.ExecNotEvaluated {
+		summary := fmt.Sprintf("%d configured", configured)
+		if len(repo.MissingLanguages) > 0 {
+			summary += " (not configured: " + model.JoinLanguages(repo.MissingLanguages) + ")"
+		}
+		return summary
 	}
 
 	succeeded := len(repo.SucceededLanguages)

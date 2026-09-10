@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -24,6 +25,11 @@ const codeqlWorkflowPath = "dynamic/github-code-scanning/codeql"
 // page normally contains the latest, latest completed and latest successful
 // run, so most repositories need only one call.
 const runPageSize = 10
+
+// analysisPageSize is how many recent analyses are read in one request.
+// Analyses are returned newest first and a run normally produces one per
+// language, so a single page covers many scan cycles for every language.
+const analysisPageSize = 100
 
 // jobLanguagePattern extracts the language from an analysis job name such as
 // "Analyze (java-kotlin)" or "Analyze (java-kotlin, ubuntu-latest)".
@@ -72,17 +78,30 @@ func (c *Collector) collectRepository(ctx context.Context, org string, source ap
 	repo.Status.Configuration = resolveConfigurationStatus(setup, setupErr, extra.AttachmentStatus)
 	if setup != nil {
 		repo.Configuration.DefaultSetupState = setup.State
-		repo.Configuration.QuerySuite = setup.QuerySuite
-		repo.Configuration.Schedule = setup.Schedule
-		repo.Configuration.ThreatModel = setup.ThreatModel
-		repo.Configuration.RunnerType = setup.RunnerType
-		repo.Configuration.RunnerLabel = setup.RunnerLabel
-		repo.Configuration.UpdatedAt = setup.UpdatedAt
 
-		configured := model.NormalizeLanguages(setup.Languages)
-		repo.ConfiguredLanguages = configured
-		for _, language := range configured {
-			languages.Get(language).Configured = true
+		// The default setup endpoint answers even when default setup is off,
+		// and the languages it returns are then an eligibility list, not a
+		// configuration: it offers javascript, javascript-typescript and
+		// typescript together, which are aliases of one another. Recording any
+		// of this for an unconfigured repository would invent configuration
+		// that does not exist.
+		//
+		// This keys off setup.State rather than the classified configuration
+		// status, because a repository whose security configuration failed to
+		// attach still has a genuinely configured default setup.
+		if strings.EqualFold(setup.State, "configured") {
+			repo.Configuration.QuerySuite = setup.QuerySuite
+			repo.Configuration.Schedule = setup.Schedule
+			repo.Configuration.ThreatModel = setup.ThreatModel
+			repo.Configuration.RunnerType = setup.RunnerType
+			repo.Configuration.RunnerLabel = setup.RunnerLabel
+			repo.Configuration.UpdatedAt = setup.UpdatedAt
+
+			configured := model.NormalizeLanguages(setup.Languages)
+			repo.ConfiguredLanguages = configured
+			for _, language := range configured {
+				languages.Get(language).Configured = true
+			}
 		}
 	}
 	// A missing or forbidden response is a durable fact about the repository,
@@ -92,16 +111,36 @@ func (c *Collector) collectRepository(ctx context.Context, org string, source ap
 		repo.Errors = append(repo.Errors, fmt.Sprintf("default setup: %v", setupErr))
 	}
 
-	if repo.Status.Configuration != model.ConfigConfigured && repo.Status.Configuration != model.ConfigAttachFailed {
-		// Default setup is off, but CodeQL may still be running from a
-		// workflow the repository controls. Checking for existing analyses
-		// avoids reporting a repository that scans perfectly well as a
-		// rollout gap, which would be the most common false positive in an
-		// estate that mixes default and advanced setup.
+	// At config depth no runtime evidence is gathered at all, so no health
+	// verdict is possible. Reporting configuration alone and stopping is what
+	// keeps the cheap tier from claiming a repository is fine.
+	if c.options.Depth == DepthConfig {
+		repo.Status.Execution = model.ExecNotEvaluated
+		repo.Status.Freshness = model.FreshNotEvaluated
+		repo.Status.Coverage = coverageForConfigOnly(&repo, detected)
+		repo.Languages = languages.Sorted()
+		finalizeStatus(&repo, false)
+		return repo
+	}
+
+	if !model.IsScanning(repo.Status.Configuration) {
+		// Default setup is off, but CodeQL may still run from a workflow the
+		// repository controls. Analyses prove it, and their analysis key names
+		// the workflow, which is the only way to find it: an advanced setup
+		// workflow has no fixed path.
 		if repo.Status.Configuration == model.ConfigNotConfigured {
-			if latest, found := c.latestCodeQLAnalysis(ctx, org, source.Name, repo.DefaultBranch); found {
+			report, err := c.collectAnalyses(ctx, org, source.Name, repo.DefaultBranch)
+			if err != nil {
+				repo.Errors = append(repo.Errors, fmt.Sprintf("analyses: %v", err))
+			}
+			// Analyses left behind by default setup after it was switched off
+			// are not evidence of an advanced setup workflow. Treating them as
+			// such would replace a genuine rollout gap with a claim that the
+			// repository scans itself.
+			if report != nil && !report.DefaultSetup && !isManagedWorkflowPath(report.WorkflowPath) {
 				repo.Status.Configuration = model.ConfigAdvancedSetup
-				repo.LastSuccessfulScan = latest
+				c.evaluateAdvancedSetup(ctx, org, source.Name, &repo, languages, evidence, report, detected)
+				return repo
 			}
 		}
 
@@ -115,8 +154,17 @@ func (c *Collector) collectRepository(ctx context.Context, org string, source ap
 		return repo
 	}
 
-	c.collectExecution(ctx, org, source.Name, repo.DefaultBranch, &repo, languages, evidence)
+	c.collectExecution(ctx, org, source.Name, repo.DefaultBranch, codeqlWorkflowPath, &repo, languages, evidence)
 	c.collectLanguageEvidence(ctx, org, source.Name, &repo, languages, evidence)
+
+	// Analyses carry a per-language error field, which is the only stable API
+	// that explains why an individual language failed while the run as a whole
+	// reported success.
+	report, err := c.collectAnalyses(ctx, org, source.Name, repo.DefaultBranch)
+	if err != nil {
+		repo.Errors = append(repo.Errors, fmt.Sprintf("analyses: %v", err))
+	}
+	applyAnalyses(report, languages, !evidence.jobsFailed)
 
 	finalizeLanguages(&repo, languages)
 	repo.Status.Freshness = c.freshness(&repo)
@@ -261,13 +309,64 @@ func resolveConfigurationStatus(setup *defaultSetup, setupErr error, attachment 
 	return model.ConfigNotConfigured
 }
 
-// latestCodeQLAnalysis reports whether CodeQL has produced any analysis on the
-// default branch, and when. It is used to recognize repositories that scan
-// through an advanced setup workflow rather than default setup.
-func (c *Collector) latestCodeQLAnalysis(ctx context.Context, org, name, branch string) (*time.Time, bool) {
+// analysisSummary is the per-language view of the most recent code scanning
+// analysis. It comes from a stable, documented API, which makes it the
+// preferred source of failure attribution over parsing Actions logs.
+type analysisSummary struct {
+	CreatedAt *time.Time
+	Error     string
+	Results   int
+}
+
+// analysisReport is the result of reading a repository's code scanning
+// analyses: the newest analysis overall, the newest one per language, and the
+// workflow that produced them.
+type analysisReport struct {
+	Newest    *time.Time
+	Languages map[model.Language]*analysisSummary
+	// WorkflowPath is the workflow that produced the newest analysis, taken
+	// from analysis_key.
+	WorkflowPath string
+	// DefaultSetup reports whether that workflow is the managed default setup
+	// workflow rather than one the repository controls.
+	DefaultSetup bool
+}
+
+// analysisCategoryPattern extracts the language from an analysis category such
+// as "/language:java-kotlin". Categories are free-form for third-party tools,
+// so anything that does not match this shape is ignored rather than guessed at.
+var analysisCategoryPattern = regexp.MustCompile(`(?i)language:([a-z0-9_+-]+)`)
+
+// workflowPathFromAnalysisKey returns the workflow path portion of an
+// analysis key, which has the form "<workflow path>:<job name>".
+func workflowPathFromAnalysisKey(key string) string {
+	if index := strings.LastIndex(key, ":"); index > 0 {
+		return key[:index]
+	}
+	return key
+}
+
+// isManagedWorkflowPath reports whether a workflow path belongs to a
+// GitHub-managed dynamic workflow rather than one the repository controls.
+// Default setup uses "dynamic/github-code-scanning/codeql", and code quality
+// uses "dynamic/github-code-quality/codeql", which is a different feature.
+func isManagedWorkflowPath(path string) bool {
+	return strings.HasPrefix(path, "dynamic/")
+}
+
+// collectAnalyses reads the most recent CodeQL analyses on the default branch.
+//
+// Each analysis carries an "error" field that names the reason a language
+// failed, which is otherwise only visible by downloading Actions logs. Reading
+// it here means per-language failure attribution does not depend on log
+// retention or on parsing free text.
+//
+// Analyses are returned newest first, so the first entry seen for a language
+// is its current state.
+func (c *Collector) collectAnalyses(ctx context.Context, org, name, branch string) (*analysisReport, error) {
 	query := url.Values{}
 	query.Set("tool_name", "CodeQL")
-	query.Set("per_page", "1")
+	query.Set("per_page", strconv.Itoa(analysisPageSize))
 	if branch != "" {
 		query.Set("ref", "refs/heads/"+branch)
 	}
@@ -277,14 +376,162 @@ func (c *Collector) latestCodeQLAnalysis(ctx context.Context, org, name, branch 
 
 	var analyses []codeScanningAnalysis
 	if err := c.client.GetJSON(ctx, path, &analyses); err != nil {
-		// A repository without code scanning returns 404 here, which simply
-		// means there is no advanced setup to recognize.
-		return nil, false
+		// A repository that has never run code scanning returns 404, which is
+		// a real answer. Anything else, including a missing permission or an
+		// exhausted rate limit, means the evidence was not read and must not
+		// be mistaken for an absence of findings.
+		if ghapi.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, err
 	}
 	if len(analyses) == 0 {
-		return nil, false
+		return nil, nil
 	}
-	return analyses[0].CreatedAt, true
+
+	report := &analysisReport{Languages: map[model.Language]*analysisSummary{}}
+	for index := range analyses {
+		analysis := &analyses[index]
+		if report.Newest == nil && analysis.CreatedAt != nil {
+			report.Newest = analysis.CreatedAt
+			// The newest analysis names the workflow currently producing
+			// results, which is how an advanced setup workflow is found.
+			report.WorkflowPath = workflowPathFromAnalysisKey(analysis.AnalysisKey)
+			report.DefaultSetup = report.WorkflowPath == codeqlWorkflowPath
+		}
+
+		match := analysisCategoryPattern.FindStringSubmatch(analysis.Category)
+		if match == nil {
+			continue
+		}
+		language, ok := model.NormalizeLanguage(match[1])
+		if !ok {
+			continue
+		}
+		// Newest first, so an existing entry is already the current one.
+		if _, seen := report.Languages[language]; seen {
+			continue
+		}
+		report.Languages[language] = &analysisSummary{
+			CreatedAt: analysis.CreatedAt,
+			Error:     strings.TrimSpace(analysis.Error),
+			Results:   analysis.Results,
+		}
+	}
+
+	return report, nil
+}
+
+// applyAnalyses records per-language analysis evidence.
+//
+// An analysis error is authoritative in the negative direction: GitHub itself
+// recorded the language as having failed, so it overrides any inference drawn
+// from a CodeQL database, which persists from earlier successful runs.
+//
+// A clean analysis is only used as proof of success when nothing better is
+// available for that language. A job that fails before uploading results
+// leaves the previous successful analysis in place, so treating it as current
+// would mask a live failure.
+//
+// It deliberately never sets Analyzed. That field means "ran in the latest
+// run" and is what distinguishes a language dropped from the configuration
+// after failing from one that was never enabled. Analyses cover months of
+// history, so setting it here would report a language removed long ago as
+// having just been silently dropped.
+func applyAnalyses(report *analysisReport, languages model.LanguageSet, trustSuccess bool) {
+	if report == nil {
+		return
+	}
+	for language, summary := range report.Languages {
+		state := languages.Get(language)
+		if summary.CreatedAt != nil {
+			state.AnalysisCreatedAt = summary.CreatedAt
+		}
+		results := summary.Results
+		state.ResultsCount = &results
+
+		if summary.Error != "" {
+			state.AnalysisError = summary.Error
+			state.Succeeded = false
+			continue
+		}
+
+		if trustSuccess && !state.Analyzed {
+			state.Succeeded = true
+		}
+	}
+}
+
+// evaluateAdvancedSetup assesses a repository that scans from a workflow it
+// controls rather than from default setup.
+//
+// Everything except intent is available from stable APIs. The analysis key
+// names the workflow, so execution can be read from its runs; the analyses
+// carry per-language errors and timestamps. What cannot be known is which
+// languages the workflow was meant to cover, because that lives in the
+// workflow file. Coverage is therefore judged the same way as default setup:
+// a supported language present in the repository and not analyzed is not being
+// scanned, whether someone left it out of a matrix or unticked a checkbox.
+func (c *Collector) evaluateAdvancedSetup(
+	ctx context.Context,
+	org, name string,
+	repo *model.Repo,
+	languages model.LanguageSet,
+	evidence *evidenceState,
+	report *analysisReport,
+	detected []model.Language,
+) {
+	// Languages that produced an analysis are the configured set for an
+	// advanced workflow: there is no configuration endpoint to consult, and an
+	// analysis is proof the workflow asked for that language.
+	configured := make([]model.Language, 0, len(report.Languages))
+	for language := range report.Languages {
+		languages.Get(language).Configured = true
+		configured = append(configured, language)
+	}
+	sortLanguageSlice(configured)
+	repo.ConfiguredLanguages = configured
+
+	// Run evidence is gathered before analysis evidence is trusted, matching
+	// the default setup path. Applying analyses first would let a stale clean
+	// analysis claim success before any job could contradict it.
+	if report.WorkflowPath != "" {
+		c.collectExecution(ctx, org, name, repo.DefaultBranch, report.WorkflowPath, repo, languages, evidence)
+	} else {
+		repo.Status.Execution = model.ExecUnknown
+	}
+
+	applyAnalyses(report, languages, !evidence.jobsFailed)
+
+	finalizeLanguages(repo, languages)
+	repo.Status.Freshness = c.freshness(repo)
+	repo.Status.Coverage = coverageStatus(repo, detected)
+	repo.Diagnostics = append(repo.Diagnostics, apiDiagnostics(repo)...)
+
+	finalizeStatus(repo, hasWarningDiagnostic(repo.Diagnostics))
+}
+
+// coverageForConfigOnly classifies coverage when only configuration evidence
+// was gathered. Nothing is known about what actually ran, so this reports the
+// rollout gap and nothing more.
+func coverageForConfigOnly(repo *model.Repo, detected []model.Language) model.CoverageStatus {
+	if len(repo.ConfiguredLanguages) == 0 && len(detected) == 0 {
+		return model.CoverageNoSupportedLanguages
+	}
+	var missing []model.Language
+	for _, language := range detected {
+		if !containsLanguage(repo.ConfiguredLanguages, language) && model.IsDetectable(language) {
+			missing = append(missing, language)
+		}
+	}
+	repo.MissingLanguages = missing
+	if len(missing) > 0 {
+		return model.CoverageGap
+	}
+	if len(repo.ConfiguredLanguages) == 0 {
+		return model.CoverageNoSupportedLanguages
+	}
+	return model.CoverageComplete
 }
 
 // coverageForUnconfigured classifies coverage for a repository that is not
@@ -296,16 +543,18 @@ func coverageForUnconfigured(detected []model.Language) model.CoverageStatus {
 	return model.CoverageGap
 }
 
-// collectExecution finds the managed CodeQL workflow and its most relevant
-// runs on the default branch.
+// collectExecution finds the CodeQL workflow at the given path and its most
+// relevant runs on the default branch. The path is the managed default setup
+// workflow for default setup, or the workflow named by an analysis key for
+// advanced setup.
 func (c *Collector) collectExecution(
 	ctx context.Context,
-	org, name, branch string,
+	org, name, branch, workflowPath string,
 	repo *model.Repo,
 	languages model.LanguageSet,
 	evidence *evidenceState,
 ) {
-	workflowID, workflowState, found, err := c.findCodeQLWorkflow(ctx, org, name)
+	workflowID, workflowState, found, err := c.findCodeQLWorkflow(ctx, org, name, workflowPath)
 	if err != nil {
 		repo.Errors = append(repo.Errors, fmt.Sprintf("workflows: %v", err))
 		repo.Status.Execution = model.ExecUnknown
@@ -318,7 +567,7 @@ func (c *Collector) collectExecution(
 		repo.Status.Execution = model.ExecNoWorkflow
 		return
 	}
-	repo.Execution.WorkflowPath = codeqlWorkflowPath
+	repo.Execution.WorkflowPath = workflowPath
 	repo.Execution.WorkflowState = workflowState
 
 	runs, err := c.fetchRuns(ctx, org, name, workflowID, branch, "", runPageSize)
@@ -396,19 +645,24 @@ func (c *Collector) collectJobs(
 		state.Analyzed = true
 		state.JobConclusion = item.Conclusion
 		state.JobURL = item.HTMLURL
-		if strings.EqualFold(item.Conclusion, "success") {
-			state.Succeeded = true
-		}
+		// Job evidence is authoritative in both directions. A job that ran and
+		// did not succeed means the language did not succeed, whatever older
+		// analyses or databases suggest.
+		state.Succeeded = strings.EqualFold(item.Conclusion, "success")
 	}
 }
 
-// findCodeQLWorkflow locates the managed default setup workflow and reports
-// its state. A workflow can exist while being disabled, manually or by GitHub
+// findCodeQLWorkflow locates the workflow at the given path and reports its
+// state. A workflow can exist while being disabled, manually or by GitHub
 // after a period of repository inactivity, in which case it no longer runs.
-func (c *Collector) findCodeQLWorkflow(ctx context.Context, org, name string) (int64, string, bool, error) {
+func (c *Collector) findCodeQLWorkflow(ctx context.Context, org, name, wantPath string) (int64, string, bool, error) {
 	var found int64
 	var state string
 	var exists bool
+
+	if wantPath == "" {
+		return 0, "", false, nil
+	}
 
 	path := fmt.Sprintf("repos/%s/%s/actions/workflows?per_page=100", url.PathEscape(org), url.PathEscape(name))
 	err := c.client.GetPaginatedJSON(ctx, path, func(page []byte) error {
@@ -417,7 +671,10 @@ func (c *Collector) findCodeQLWorkflow(ctx context.Context, org, name string) (i
 			return err
 		}
 		for _, workflow := range list.Workflows {
-			if workflow.Path == codeqlWorkflowPath {
+			// Matched exactly. A prefix match would also catch
+			// "dynamic/github-code-quality/codeql", which is a different
+			// product feature and not code scanning.
+			if workflow.Path == wantPath {
 				found = workflow.ID
 				state = workflow.State
 				exists = true
@@ -712,7 +969,12 @@ func (c *Collector) staleThreshold(repo *model.Repo) (time.Duration, string) {
 }
 
 // newestSuccessfulEvidence prefers the last successful run, falling back to the
-// newest CodeQL database when run history is unavailable.
+// newest CodeQL database and then to the newest clean analysis.
+//
+// The analysis fallback matters for repositories whose analyses do not come
+// from a discoverable Actions workflow, such as a CodeQL CLI upload from
+// external CI. Without it a repository analyzed today would be reported as
+// never scanned.
 func newestSuccessfulEvidence(repo *model.Repo) *time.Time {
 	var newest *time.Time
 
@@ -725,11 +987,18 @@ func newestSuccessfulEvidence(repo *model.Repo) *time.Time {
 	}
 
 	for _, state := range repo.Languages {
-		if state.DatabaseUpdatedAt == nil {
+		if state.DatabaseUpdatedAt != nil {
+			if newest == nil || state.DatabaseUpdatedAt.After(*newest) {
+				value := *state.DatabaseUpdatedAt
+				newest = &value
+			}
+		}
+		// Only a clean analysis is evidence of a successful scan.
+		if state.AnalysisCreatedAt == nil || state.AnalysisError != "" {
 			continue
 		}
-		if newest == nil || state.DatabaseUpdatedAt.After(*newest) {
-			value := *state.DatabaseUpdatedAt
+		if newest == nil || state.AnalysisCreatedAt.After(*newest) {
+			value := *state.AnalysisCreatedAt
 			newest = &value
 		}
 	}
@@ -774,15 +1043,40 @@ func apiDiagnostics(repo *model.Repo) []model.Diagnostic {
 	// from the configuration, so nothing will scan it again. No other view
 	// surfaces this.
 	for _, language := range repo.DeselectedLanguages {
+		message := fmt.Sprintf(
+			"%s was analyzed in the latest run but is no longer selected in default setup; "+
+				"it will not be scanned again until it is re-enabled", language)
+		// The analysis error names the reason GitHub dropped the language,
+		// which turns this from an observation into something actionable.
+		if reason := languageAnalysisError(repo, language); reason != "" {
+			message = fmt.Sprintf("%s (last analysis failed: %s)", message, reason)
+		}
 		diagnostics = append(diagnostics, model.Diagnostic{
 			Source:   model.SourceAPI,
 			Severity: "error",
 			Code:     "language-auto-deselected",
 			Language: language,
-			Message: fmt.Sprintf(
-				"%s was analyzed in the latest run but is no longer selected in default setup; "+
-					"it will not be scanned again until it is re-enabled", language),
-			URL: repo.URL + "/settings/code-scanning/default-setup",
+			Message:  message,
+			URL:      repo.URL + "/settings/code-scanning/default-setup",
+		})
+	}
+
+	// A language whose most recent analysis carries an error is failing even
+	// if the workflow reported success. This comes from a documented API
+	// field, so it does not depend on log retention.
+	for index := range repo.Languages {
+		state := &repo.Languages[index]
+		if state.AnalysisError == "" || !state.Configured {
+			continue
+		}
+		diagnostics = append(diagnostics, model.Diagnostic{
+			Source:   model.SourceAPI,
+			Severity: "error",
+			Code:     "language-analysis-error",
+			Language: state.Language,
+			Message: fmt.Sprintf("the most recent %s analysis failed: %s",
+				state.Language, state.AnalysisError),
+			URL: runURL,
 		})
 	}
 
@@ -790,6 +1084,11 @@ func apiDiagnostics(repo *model.Repo) []model.Diagnostic {
 	// successful analysis.
 	if repo.Status.Execution == model.ExecSuccess {
 		for _, language := range repo.FailedLanguages {
+			// A recorded analysis error already explains this language, with
+			// the actual reason attached.
+			if languageAnalysisError(repo, language) != "" {
+				continue
+			}
 			diagnostics = append(diagnostics, model.Diagnostic{
 				Source:   model.SourceAPI,
 				Severity: "warning",
@@ -871,4 +1170,24 @@ func containsLanguage(languages []model.Language, wanted model.Language) bool {
 		}
 	}
 	return false
+}
+
+// sortLanguageSlice orders languages canonically so output is deterministic.
+func sortLanguageSlice(languages []model.Language) {
+	set := make(map[model.Language]bool, len(languages))
+	for _, language := range languages {
+		set[language] = true
+	}
+	ordered := model.SortLanguageSet(set)
+	copy(languages, ordered)
+}
+
+// languageAnalysisError returns the recorded failure reason for a language, if// GitHub attached one to its most recent analysis.
+func languageAnalysisError(repo *model.Repo, wanted model.Language) string {
+	for index := range repo.Languages {
+		if repo.Languages[index].Language == wanted {
+			return repo.Languages[index].AnalysisError
+		}
+	}
+	return ""
 }

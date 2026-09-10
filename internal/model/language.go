@@ -131,6 +131,14 @@ type LanguageState struct {
 	// AnalysisCreatedAt is when the language last produced a code scanning
 	// analysis on the default branch.
 	AnalysisCreatedAt *Timestamp `json:"analysis_created_at,omitempty"`
+	// AnalysisError is the failure reason GitHub recorded against the most
+	// recent analysis for the language. This is the authoritative, log-free
+	// explanation of why a language is not producing results.
+	AnalysisError string `json:"analysis_error,omitempty"`
+	// ResultsCount is the number of alerts in the most recent analysis for
+	// the language. Zero results on a language that should produce them is a
+	// weak signal on its own, so it is reported rather than judged.
+	ResultsCount *int `json:"results_count,omitempty"`
 }
 
 // LanguageSet is a helper for assembling per-language state.
@@ -158,6 +166,11 @@ func (s LanguageSet) Sorted() []LanguageState {
 		states = append(states, *s[lang])
 	}
 	return states
+}
+
+// SortLanguageSet returns languages in canonical presentation order.
+func SortLanguageSet(set map[Language]bool) []Language {
+	return sortLanguages(set)
 }
 
 // sortLanguages returns languages in canonical order, with any unrecognized

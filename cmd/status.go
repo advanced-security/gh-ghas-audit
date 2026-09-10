@@ -57,6 +57,8 @@ type statusOptions struct {
 
 	failOn []string
 
+	scanDepth          string
+	deepScope          string
 	deepDiagnostics    string
 	deepMaxRepos       int
 	deepMaxMegabytes   int
@@ -155,12 +157,20 @@ func init() {
 	flags.StringSliceVar(&statusOpts.failOn, "fail-on", nil,
 		"Exit with code 2 when any repository has one of these statuses, for use in scheduled workflows")
 
+	flags.StringVar(&statusOpts.scanDepth, "scan-depth", "health",
+		"How much evidence to gather: 'config' (configuration only, cheapest, never reports healthy), "+
+			"'health' (adds runs, jobs and analyses), or 'diagnostics' (adds Actions log parsing, slow and best effort)")
+	flags.StringVar(&statusOpts.deepScope, "deep-scope", "all",
+		"At diagnostics depth, which repositories to inspect logs for: 'all' or 'problematic'. "+
+			"'problematic' skips repositories that already look healthy, so it can explain a failure but cannot discover one")
+
 	flags.StringVar(&statusOpts.deepDiagnostics, "deep-diagnostics", "",
-		"Download and parse Actions logs for extra detail: 'problematic' or 'all'. Slow, best effort, and rate limit heavy")
+		"Deprecated, use --scan-depth diagnostics with --deep-scope")
+	_ = flags.MarkDeprecated("deep-diagnostics", "use --scan-depth diagnostics with --deep-scope")
 	flags.IntVar(&statusOpts.deepMaxRepos, "deep-diagnostics-max-repos", 200,
-		"Maximum repositories to inspect when --deep-diagnostics is enabled")
+		"Maximum repositories to inspect at diagnostics depth")
 	flags.IntVar(&statusOpts.deepMaxMegabytes, "deep-diagnostics-max-mb", 32,
-		"Maximum megabytes of logs to download when --deep-diagnostics is enabled")
+		"Maximum megabytes of logs to download at diagnostics depth")
 
 	flags.BoolVar(&statusOpts.detailed, "detailed", false,
 		"Add a detail column explaining why each repository has its status")
@@ -213,7 +223,9 @@ func runCodeScanningStatus(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	deepMode, err := parseDeepDiagnostics(statusOpts.deepDiagnostics)
+	depth, deepMode, err := resolveDepth(
+		statusOpts.scanDepth, statusOpts.deepScope, statusOpts.deepDiagnostics,
+		cmd.Flags().Changed("scan-depth"))
 	if err != nil {
 		return err
 	}
@@ -267,6 +279,7 @@ func runCodeScanningStatus(cmd *cobra.Command, _ []string) error {
 		VisibilityFilter:      lowerAll(statusOpts.visibilityFilter),
 		NameFilter:            statusOpts.nameFilter,
 		ExcludeFilter:         statusOpts.excludeFilter,
+		Depth:                 depth,
 		DeepDiagnostics:       deepMode,
 		Progress:              progress,
 	}
@@ -628,8 +641,66 @@ func parseDeepDiagnostics(value string) (collector.DeepDiagnosticsMode, error) {
 	case "all":
 		return collector.DeepDiagnosticsAll, nil
 	default:
-		return "", fmt.Errorf("invalid --deep-diagnostics value %q; expected 'problematic' or 'all'", value)
+		return "", fmt.Errorf("invalid value %q; expected 'problematic' or 'all'", value)
 	}
+}
+
+// parseDepth resolves the scan depth. The dial words are accepted as aliases
+// because they are the first thing people reach for, but the named values are
+// canonical since they say what is gathered and what it costs.
+func parseDepth(value string) (collector.Depth, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "health", "medium", "med":
+		return collector.DepthHealth, nil
+	case "config", "configuration", "low":
+		return collector.DepthConfig, nil
+	case "diagnostics", "diagnostic", "high", "deep":
+		return collector.DepthDiagnostics, nil
+	default:
+		return "", fmt.Errorf("invalid --scan-depth value %q; expected 'config', 'health' or 'diagnostics'", value)
+	}
+}
+
+// resolveDepth combines the scan depth, the deep scope and the deprecated
+// --deep-diagnostics flag into a single decision.
+//
+// Log inspection defaults to every repository, because restricting it to
+// repositories that already look unhealthy can only explain a bad verdict and
+// never discover one: a warning hidden behind a green run is invisible to it.
+func resolveDepth(depthValue, scopeValue, legacyValue string, depthExplicit bool) (collector.Depth, collector.DeepDiagnosticsMode, error) {
+	depth, err := parseDepth(depthValue)
+	if err != nil {
+		return "", "", err
+	}
+
+	// The deprecated flag still selects diagnostics depth and its own scope,
+	// so existing invocations keep working. Combining it with an explicit
+	// lower depth is contradictory, and silently choosing the expensive one
+	// would be the wrong way to resolve it.
+	if strings.TrimSpace(legacyValue) != "" {
+		if depthExplicit && depth != collector.DepthDiagnostics {
+			return "", "", fmt.Errorf(
+				"--deep-diagnostics implies --scan-depth diagnostics, which conflicts with --scan-depth %s", depthValue)
+		}
+		mode, modeErr := parseDeepDiagnostics(legacyValue)
+		if modeErr != nil {
+			return "", "", fmt.Errorf("invalid --deep-diagnostics %w", modeErr)
+		}
+		return collector.DepthDiagnostics, mode, nil
+	}
+
+	if depth != collector.DepthDiagnostics {
+		return depth, collector.DeepDiagnosticsOff, nil
+	}
+
+	scope, err := parseDeepDiagnostics(scopeValue)
+	if err != nil {
+		return "", "", fmt.Errorf("invalid --deep-scope %w", err)
+	}
+	if scope == collector.DeepDiagnosticsOff {
+		scope = collector.DeepDiagnosticsAll
+	}
+	return depth, scope, nil
 }
 
 func splitList(value string) []string {

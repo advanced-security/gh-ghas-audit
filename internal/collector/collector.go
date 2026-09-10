@@ -26,18 +26,39 @@ var (
 	errPropertiesUnavailable = errors.New("custom properties API unavailable")
 )
 
-// DeepDiagnosticsMode selects how aggressively Actions logs are inspected.
+// Depth selects how much evidence is gathered. Each level strictly adds a kind
+// of evidence and closes a specific blind spot, so the choice is one of scope
+// rather than quality.
+type Depth string
+
+const (
+	// DepthConfig reads configuration only. It is the cheapest level and can
+	// find rollout gaps, but it gathers no runtime evidence and therefore
+	// never reports a repository as healthy.
+	DepthConfig Depth = "config"
+	// DepthHealth adds workflows, runs, jobs, analyses and CodeQL databases.
+	// This is the default and is safe for scheduled automation.
+	DepthHealth Depth = "health"
+	// DepthDiagnostics adds Actions log parsing, which is slow, best effort
+	// and bounded by the deep diagnostics budgets.
+	DepthDiagnostics Depth = "diagnostics"
+)
+
+// DeepDiagnosticsMode selects which repositories have their logs inspected at
+// diagnostics depth.
 type DeepDiagnosticsMode string
 
 const (
-	// DeepDiagnosticsOff performs no log retrieval. This is the default.
+	// DeepDiagnosticsOff performs no log retrieval.
 	DeepDiagnosticsOff DeepDiagnosticsMode = ""
 	// DeepDiagnosticsProblematic inspects only repositories that already look
-	// unhealthy, which keeps the extra cost proportional to the problem.
+	// unhealthy. It keeps cost proportional to the problem, but because it
+	// skips repositories that currently look healthy it can only explain a bad
+	// verdict, never discover one.
 	DeepDiagnosticsProblematic DeepDiagnosticsMode = "problematic"
-	// DeepDiagnosticsAll inspects every configured repository, including
-	// healthy ones. This is the only mode that can surface warnings hidden
-	// behind a green workflow run, and it is substantially more expensive.
+	// DeepDiagnosticsAll inspects every configured repository. This is the
+	// default at diagnostics depth because it is the only setting that can
+	// surface a warning hidden behind a green workflow run.
 	DeepDiagnosticsAll DeepDiagnosticsMode = "all"
 )
 
@@ -98,6 +119,8 @@ type Options struct {
 	NameFilter       []string
 	ExcludeFilter    []string
 
+	// Depth selects how much evidence is gathered. Empty means DepthHealth.
+	Depth           Depth
 	DeepDiagnostics DeepDiagnosticsMode
 	LogFetcher      LogFetcher
 
@@ -128,6 +151,9 @@ func New(client Client, options Options) *Collector {
 	}
 	if options.StaleAfter <= 0 {
 		options.StaleAfter = 8 * 24 * time.Hour
+	}
+	if options.Depth == "" {
+		options.Depth = DepthHealth
 	}
 	return &Collector{client: client, options: options}
 }
@@ -203,6 +229,7 @@ func (c *Collector) Collect(ctx context.Context, toolVersion string) (*model.Rep
 			Properties:            c.options.Properties,
 			GroupByProperty:       c.options.GroupByProperty,
 			Concurrency:           c.options.Concurrency,
+			ScanDepth:             string(c.options.Depth),
 			DeepDiagnostics:       string(c.options.DeepDiagnostics),
 		},
 		Repositories: repositories,

@@ -16,11 +16,11 @@ on:
     - cron: "0 6 * * *"
   workflow_dispatch:
     inputs:
-      deep_diagnostics:
-        description: "Parse Actions logs for extra detail (slow, best effort)"
+      scan_depth:
+        description: "How much evidence to gather"
         type: choice
-        default: "off"
-        options: ["off", "problematic", "all"]
+        default: "health"
+        options: ["config", "health", "diagnostics"]
 
 permissions:
   contents: read
@@ -70,7 +70,7 @@ jobs:
       - name: Generate the status report
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          DEEP: ${{ inputs.deep_diagnostics }}
+          DEPTH: ${{ inputs.scan_depth }}
         run: |
           set -euo pipefail
           mkdir -p reports
@@ -92,8 +92,8 @@ jobs:
           # provide, so enterprise scans usually run per organization or with
           # a scoped personal access token.
 
-          if [ "${DEEP:-off}" != "off" ]; then
-            args+=(--deep-diagnostics "$DEEP")
+          if [ -n "${DEPTH:-}" ]; then
+            args+=(--scan-depth "$DEPTH")
           fi
 
           gh ghas-audit "${args[@]}" --format json          --output reports/status.json

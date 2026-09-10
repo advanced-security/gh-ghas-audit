@@ -76,7 +76,10 @@ type Settings struct {
 	Properties            []string `json:"properties,omitempty"`
 	GroupByProperty       string   `json:"group_by_property,omitempty"`
 	Concurrency           int      `json:"concurrency"`
-	DeepDiagnostics       string   `json:"deep_diagnostics,omitempty"`
+	// ScanDepth records how much evidence this report is based on, so a
+	// stored artifact states what it did and did not check.
+	ScanDepth       string `json:"scan_depth,omitempty"`
+	DeepDiagnostics string `json:"deep_diagnostics,omitempty"`
 }
 
 // Summary holds aggregate counts for an entire report.

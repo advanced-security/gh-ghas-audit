@@ -1,6 +1,7 @@
 package model
 
 import (
+	"encoding/json"
 	"sort"
 	"strings"
 )
@@ -102,12 +103,24 @@ func IsDetectable(lang Language) bool {
 	return !undetectableLanguages[lang]
 }
 
+// RuntimeEvaluation distinguishes measured language evidence from uncollected
+// or incomplete runtime evidence.
+type RuntimeEvaluation string
+
+const (
+	RuntimeNotEvaluated RuntimeEvaluation = "not-evaluated"
+	RuntimeEvaluated    RuntimeEvaluation = "evaluated"
+	RuntimeIncomplete   RuntimeEvaluation = "incomplete"
+)
+
 // LanguageState describes what is happening to a single language in a
 // repository. Analyzing coverage per language is what distinguishes a truly
 // healthy repository from one whose workflow is green while a language is
 // quietly skipped.
 type LanguageState struct {
 	Language Language `json:"language"`
+	// RuntimeEvaluation applies to Analyzed and Succeeded.
+	RuntimeEvaluation RuntimeEvaluation `json:"runtime_evaluation,omitempty"`
 	// Detected means the language was found in the repository source.
 	Detected bool `json:"detected"`
 	// Configured means default setup lists the language for analysis.
@@ -139,6 +152,22 @@ type LanguageState struct {
 	// the language. Zero results on a language that should produce them is a
 	// weak signal on its own, so it is reported rather than judged.
 	ResultsCount *int `json:"results_count,omitempty"`
+}
+
+// MarshalJSON preserves booleans internally while emitting null for runtime
+// values that were deliberately not evaluated.
+func (state LanguageState) MarshalJSON() ([]byte, error) {
+	type plain LanguageState
+	value := struct {
+		plain
+		Analyzed  *bool `json:"analyzed"`
+		Succeeded *bool `json:"succeeded"`
+	}{plain: plain(state)}
+	if state.RuntimeEvaluation != RuntimeNotEvaluated {
+		value.Analyzed = &state.Analyzed
+		value.Succeeded = &state.Succeeded
+	}
+	return json.Marshal(value)
 }
 
 // LanguageSet is a helper for assembling per-language state.

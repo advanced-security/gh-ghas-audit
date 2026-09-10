@@ -173,9 +173,9 @@ func (s *Store) Clear() error {
 	return nil
 }
 
-// Prune deletes entries that are older than the maximum age or that were
-// written by a different schema version, keeping the directory from growing
-// without bound across releases.
+// Prune deletes owned entries older than the maximum age. Schema-incompatible
+// entries are ignored by Get and overwritten at the same URL path by Put,
+// avoiding a full read of every cached response at startup.
 func (s *Store) Prune() error {
 	if s == nil || s.disable || s.maxAge <= 0 {
 		return nil

@@ -94,6 +94,27 @@ func TestClearRemovesEntries(t *testing.T) {
 	}
 }
 
+func TestSchemaChangesReplaceTheSameCacheEntry(t *testing.T) {
+	dir := t.TempDir()
+	for _, schema := range []string{"v1", "v2", "v3"} {
+		store := New(Options{Dir: dir, SchemaKey: schema})
+		if _, _, _, ok := store.Get("same-url"); ok {
+			t.Fatal("an incompatible schema was reused")
+		}
+		store.Put("same-url", "etag", []byte(schema), "")
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+		if _, body, _, ok := store.Get("same-url"); !ok || string(body) != schema {
+			t.Fatalf("new schema was not stored: %q", body)
+		}
+		files, err := os.ReadDir(dir)
+		if err != nil || len(files) != 1 {
+			t.Fatalf("schema changes created additional generations: files=%d, err=%v", len(files), err)
+		}
+	}
+}
+
 func TestCleanupPreservesUnrelatedFiles(t *testing.T) {
 	for _, operation := range []string{"clear", "prune"} {
 		t.Run(operation, func(t *testing.T) {

@@ -185,6 +185,15 @@ func finalizeStatus(repo *model.Repo, hasWarning bool) {
 	repo.Status.Incomplete = len(repo.Errors) > 0
 	repo.Status.Activity = repo.Activity
 	repo.Status.StaleAfter = repo.StaleAfter
+	evaluation := model.RuntimeEvaluated
+	if repo.Status.Execution == model.ExecNotEvaluated || repo.Status.Execution == model.ExecNotApplicable {
+		evaluation = model.RuntimeNotEvaluated
+	} else if repo.Status.Incomplete {
+		evaluation = model.RuntimeIncomplete
+	}
+	for index := range repo.Languages {
+		repo.Languages[index].RuntimeEvaluation = evaluation
+	}
 	model.Classify(&repo.Status, hasWarning)
 }
 

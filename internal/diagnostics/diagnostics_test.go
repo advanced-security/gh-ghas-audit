@@ -172,8 +172,10 @@ func TestUnrecognizedAnnotationsAreInformational(t *testing.T) {
 // Genuine failures must still be escalated.
 func TestRealProblemsRemainWarningsOrErrors(t *testing.T) {
 	cases := map[string]string{
-		"We were unable to automatically build your code":                severityError,
-		"No source code was seen during the build":                       severityWarning,
+		"We were unable to automatically build your code": severityError,
+		// "No analyzable code" means the language produced nothing at all, so
+		// it is an error rather than a warning.
+		"No source code was seen during the build":                       severityError,
 		"Java analysis failed to extract a dependency graph from gradle": severityWarning,
 		"CodeQL detected a low-quality scan":                             severityWarning,
 	}

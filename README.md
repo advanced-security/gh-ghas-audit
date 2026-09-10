@@ -36,6 +36,9 @@ For every repository in scope:
   successfully, including rollouts that **failed to attach**.
 - Whether the most recent analysis run succeeded, failed, timed out, is still
   running, or has **never completed at all**.
+- Whether the managed CodeQL workflow is **disabled**, which stops scheduled
+  scans. GitHub disables workflows automatically after a period of repository
+  inactivity, so this happens without anyone changing a setting.
 - **When the repository last scanned successfully**, and whether that is within
   your freshness threshold.
 - **Which languages are actually being analyzed**, compared against the
@@ -451,9 +454,14 @@ presents each entry, so the report agrees with the page:
 
 | Status page | Reported as | Effect on status |
 | --- | --- | --- |
-| Error, for example a failed build | `error` | Repository is failing or degraded |
+| Error, for example a failed build or no analyzable code | `error` | Repository is failing or degraded |
 | Warning, for example low analysis quality or duplicate classes filtered out | `warning` | Repository is degraded |
 | Suggestion, for example build-mode `none` or private package registries | `info` | No effect |
+
+The status page has three levels and takes the highest one, where a
+"suggestion" is the lowest level presented with a lightbulb rather than a
+separate tier. This report follows the same model, so `info` findings are
+recorded without changing a verdict.
 
 Anything unrecognized is recorded as `info` with its original text, so a new
 diagnostic is surfaced without turning a repository red on its own. Routine

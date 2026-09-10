@@ -195,6 +195,10 @@ type ConfigDetail struct {
 // ExecutionDetail captures evidence about analysis runs.
 type ExecutionDetail struct {
 	WorkflowPath string `json:"workflow_path,omitempty"`
+	// WorkflowState is the Actions workflow state. Anything other than
+	// "active" means the managed workflow is disabled and no longer runs, for
+	// example after being disabled manually or through repository inactivity.
+	WorkflowState string `json:"workflow_state,omitempty"`
 	// LatestRun is the most recent run of any state, including in-progress.
 	LatestRun *RunRef `json:"latest_run,omitempty"`
 	// LatestCompletedRun is the most recent run that finished, and is what

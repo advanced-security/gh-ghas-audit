@@ -262,7 +262,7 @@ func (c *Collector) collectExecution(
 	languages model.LanguageSet,
 	evidence *evidenceState,
 ) {
-	workflowID, found, err := c.findCodeQLWorkflow(ctx, org, name)
+	workflowID, workflowState, found, err := c.findCodeQLWorkflow(ctx, org, name)
 	if err != nil {
 		repo.Errors = append(repo.Errors, fmt.Sprintf("workflows: %v", err))
 		repo.Status.Execution = model.ExecUnknown
@@ -276,6 +276,7 @@ func (c *Collector) collectExecution(
 		return
 	}
 	repo.Execution.WorkflowPath = codeqlWorkflowPath
+	repo.Execution.WorkflowState = workflowState
 
 	runs, err := c.fetchRuns(ctx, org, name, workflowID, branch, "", runPageSize)
 	if err != nil {
@@ -358,9 +359,12 @@ func (c *Collector) collectJobs(
 	}
 }
 
-// findCodeQLWorkflow locates the managed default setup workflow.
-func (c *Collector) findCodeQLWorkflow(ctx context.Context, org, name string) (int64, bool, error) {
+// findCodeQLWorkflow locates the managed default setup workflow and reports
+// its state. A workflow can exist while being disabled, manually or by GitHub
+// after a period of repository inactivity, in which case it no longer runs.
+func (c *Collector) findCodeQLWorkflow(ctx context.Context, org, name string) (int64, string, bool, error) {
 	var found int64
+	var state string
 	var exists bool
 
 	path := fmt.Sprintf("repos/%s/%s/actions/workflows?per_page=100", url.PathEscape(org), url.PathEscape(name))
@@ -372,6 +376,7 @@ func (c *Collector) findCodeQLWorkflow(ctx context.Context, org, name string) (i
 		for _, workflow := range list.Workflows {
 			if workflow.Path == codeqlWorkflowPath {
 				found = workflow.ID
+				state = workflow.State
 				exists = true
 			}
 		}
@@ -380,11 +385,18 @@ func (c *Collector) findCodeQLWorkflow(ctx context.Context, org, name string) (i
 	if err != nil {
 		if ghapi.IsNotFound(err) || ghapi.IsForbidden(err) {
 			// Actions can be disabled for the repository or organization.
-			return 0, false, nil
+			return 0, "", false, nil
 		}
-		return 0, false, err
+		return 0, "", false, err
 	}
-	return found, exists, nil
+	return found, state, exists, nil
+}
+
+// workflowActive reports whether a workflow state means it will still run.
+// Anything else, such as being disabled manually or through inactivity, means
+// scheduled scans have stopped.
+func workflowActive(state string) bool {
+	return state == "" || strings.EqualFold(state, "active")
 }
 
 func (c *Collector) fetchRuns(ctx context.Context, org, name string, workflowID int64, branch, status string, perPage int) ([]workflowRun, error) {
@@ -764,6 +776,20 @@ func apiDiagnostics(repo *model.Repo) []model.Diagnostic {
 			Message: fmt.Sprintf("security configuration %q failed to attach to this repository",
 				repo.Configuration.SecurityConfiguration),
 			URL: repo.URL + "/settings/security_analysis",
+		})
+	}
+
+	// A workflow that exists but is disabled will not run again, whether it
+	// was disabled manually or automatically after a period of inactivity.
+	if state := repo.Execution.WorkflowState; !workflowActive(state) {
+		diagnostics = append(diagnostics, model.Diagnostic{
+			Source:   model.SourceAPI,
+			Severity: "warning",
+			Code:     "workflow-disabled",
+			Message: fmt.Sprintf(
+				"the managed CodeQL workflow exists but is %s, so scheduled scans are not running",
+				strings.ReplaceAll(state, "_", " ")),
+			URL: repo.URL + "/actions",
 		})
 	}
 

@@ -173,9 +173,12 @@ var knownPatterns = []pattern{
 	},
 	{
 		code:     "no-code-found",
-		severity: severityWarning,
-		matcher:  regexp.MustCompile(`(?i)(no (source )?code (was )?(found|seen)|did not (see|find) any code|no supported (source )?code)`),
-		summary:  "CodeQL found no analyzable code for a configured language",
+		severity: severityError,
+		// GitHub treats "no analyzable code" as an error rather than a
+		// warning: the language produced nothing at all, so the repository is
+		// not covered for it.
+		matcher: regexp.MustCompile(`(?i)(no (source )?code (was )?(found|seen)|did not (see|find) any code|no supported (source )?code|no analyzable code)`),
+		summary: "CodeQL found no analyzable code for a configured language",
 	},
 	{
 		code:     "language-auto-deselected",

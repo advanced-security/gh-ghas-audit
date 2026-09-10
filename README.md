@@ -41,6 +41,9 @@ For every repository in scope:
 - **Which languages are actually being analyzed**, compared against the
   languages present in the repository and the languages default setup claims to
   cover.
+- **Languages silently dropped from default setup.** When a language's
+  analysis fails, GitHub clears its checkbox and it is never scanned again.
+  Nothing else in the product surfaces that.
 - Languages present that CodeQL **cannot** analyze at all, such as Scala, so
   you know where CodeQL alone does not provide coverage.
 - Direct links to the workflow run and the per-language job, as evidence.
@@ -137,6 +140,35 @@ Two distinctions are deliberate and matter in practice:
 - **`not-applicable` is not `not-configured`.** An empty repository, or one
   containing only HTML and CSS, keeps default setup "configured" forever.
   Reporting those as broken would bury the genuine failures.
+
+### Languages dropped after a failed analysis
+
+When a language's analysis fails, GitHub clears that language from the default
+setup configuration. It runs once, fails, and is never scanned again. The
+settings page and the API agree it is no longer configured, while the tool
+status page still shows its failed configuration, so the drop itself is
+invisible.
+
+The primary detection needs no run history. Repository languages are normalized
+onto CodeQL identifiers and compared against the configured languages:
+
+| Repository contains | Normalizes to | Configured | Result |
+| --- | --- | --- | --- |
+| Kotlin | `java-kotlin` | `c-cpp` only | not being scanned |
+| TypeScript | `javascript-typescript` | `javascript-typescript` | covered |
+| Scala | not supported | n/a | CodeQL cannot analyze it |
+
+Where the latest run also contains an analysis job for a language that is no
+longer configured, it was enabled until recently, which separates two cases
+that need different fixes:
+
+| Evidence | Reported as | Fix |
+| --- | --- | --- |
+| Detected, not configured, no analysis job | `language-not-configured` (warning) | Enable the language |
+| Detected, not configured, failed analysis job | `language-auto-deselected` (error) | Re-enable it **and** fix the failure |
+
+Both appear in `missing_languages`; the dropped ones also appear in
+`deselected_languages` and in the `Languages dropped after failing` CSV column.
 
 ## Filtering and grouping
 

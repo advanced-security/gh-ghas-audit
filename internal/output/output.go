@@ -70,6 +70,7 @@ func WriteNDJSON(writer io.Writer, report *model.Report) error {
 		"scope":          report.Scope,
 		"settings":       report.Settings,
 		"summary":        report.Summary,
+		"organizations":  report.Organizations,
 		"warnings":       report.Warnings,
 		"stats":          report.Stats,
 	}

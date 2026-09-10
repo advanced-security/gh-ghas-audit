@@ -55,10 +55,8 @@ func TestDisabledWorkflowIsReported(t *testing.T) {
 			t.Errorf("%s: expected a workflow-disabled diagnostic, got %+v", state, repo.Diagnostics)
 		}
 
-		// A repository whose scans have stopped must not be reported healthy,
-		// even while its last run is recent and successful.
-		if repo.Status.Overall == model.SeverityHealthy {
-			t.Errorf("%s: overall = healthy, but scheduled scans are not running", state)
+		if repo.Status.Execution != model.ExecutionStatus("disabled") || repo.Status.Overall != model.SeverityStalled {
+			t.Errorf("%s: disabled scans must be stalled, got %+v", state, repo.Status)
 		}
 	}
 }
@@ -116,5 +114,44 @@ func TestWorkflowActive(t *testing.T) {
 		if workflowActive(state) {
 			t.Errorf("workflowActive(%q) = true, want false", state)
 		}
+	}
+}
+
+func TestDisabledWorkflowPreservesKnownFailure(t *testing.T) {
+	client := buildClient(t, scenario{
+		name:         "disabled-failed",
+		languages:    []string{"Go"},
+		defaultSetup: defaultSetup{State: "configured", Languages: []string{"go"}},
+		workflows:    workflowWithState("disabled_manually"),
+		runs:         map[string]any{"": runList("failure", time.Hour)},
+		jobs:         jobsFor(map[string]string{"go": "failure"}),
+	})
+	repo := findRepo(t, collect(t, client, defaultActivityOptions()), "disabled-failed")
+	if repo.Status.Overall != model.SeverityFailing || repo.Status.Execution != model.ExecFailure {
+		t.Fatalf("disabled state hid a known failed run: %+v", repo.Status)
+	}
+}
+
+func TestDisabledAdvancedWorkflowIsStalledRatherThanStale(t *testing.T) {
+	const path = ".github/workflows/codeql.yml"
+	workflows := advancedWorkflows(path)
+	workflows.Workflows[0].State = "disabled_inactivity"
+	client := buildClient(t, scenario{
+		name: "disabled-advanced", languages: []string{"Go"},
+		defaultSetup: defaultSetup{State: "not-configured"},
+		workflows:    workflows,
+		runs:         map[string]any{"": runListFor(path, "success", 20*day)},
+		jobs:         jobsFor(map[string]string{"go": "success"}),
+	})
+	older := time.Now().Add(-20 * day)
+	client.set("repos/"+testOrg+"/disabled-advanced/code-scanning/analyses", []codeScanningAnalysis{
+		{AnalysisKey: path + ":analyze", Category: "/language:go", CreatedAt: &older},
+	})
+	repo := findRepo(t, collect(t, client, defaultActivityOptions()), "disabled-advanced")
+	if repo.Status.Execution != model.ExecDisabled || repo.Status.Overall != model.SeverityStalled {
+		t.Fatalf("disabled advanced workflow is not stalled: %+v", repo.Status)
+	}
+	if repo.Execution.LatestCompletedRun.Conclusion != "success" {
+		t.Fatal("disabled workflow lost its historical run evidence")
 	}
 }

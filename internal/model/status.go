@@ -33,7 +33,7 @@ const (
 	ConfigUnknown ConfigurationStatus = "unknown"
 )
 
-// ExecutionStatus describes the outcome of the most relevant default setup
+// ExecutionStatus describes the selected CodeQL workflow and its most relevant
 // analysis run on the repository default branch.
 type ExecutionStatus string
 
@@ -55,6 +55,8 @@ const (
 	ExecInProgress ExecutionStatus = "in-progress"
 	// ExecQueued means a run is queued or waiting for a runner.
 	ExecQueued ExecutionStatus = "queued"
+	// ExecDisabled means the selected workflow is disabled and cannot scan.
+	ExecDisabled ExecutionStatus = "disabled"
 	// ExecNoWorkflow means default setup is configured but the managed CodeQL
 	// workflow does not exist. Scanning has never been provisioned.
 	ExecNoWorkflow ExecutionStatus = "no-workflow"
@@ -221,11 +223,10 @@ func ExecutionRunning(status ExecutionStatus) bool {
 	return status == ExecInProgress || status == ExecQueued
 }
 
-// ExecutionStalled reports whether scanning is configured but has produced no
-// completed run. These repositories look enabled in coverage views while never
-// having scanned anything.
+// ExecutionStalled reports whether configured scanning cannot run or has never
+// completed.
 func ExecutionStalled(status ExecutionStatus) bool {
-	return status == ExecNoWorkflow || status == ExecNoCompletedRun
+	return status == ExecNoWorkflow || status == ExecNoCompletedRun || status == ExecDisabled
 }
 
 // Status holds the independent health dimensions for a repository. Keeping
@@ -341,6 +342,8 @@ func classify(status *Status, hasWarning bool) (Severity, []string) {
 		}
 		if status.Execution == ExecNoWorkflow {
 			reasons = append(reasons, setupNoun(status)+" is configured but no CodeQL workflow exists")
+		} else if status.Execution == ExecDisabled {
+			reasons = append(reasons, "the CodeQL workflow is disabled and cannot run")
 		} else {
 			reasons = append(reasons, setupNoun(status)+" is configured but no analysis run has ever completed")
 		}

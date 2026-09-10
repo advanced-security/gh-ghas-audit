@@ -351,12 +351,22 @@ func containsLanguage(languages []model.Language, wanted model.Language) bool {
 func detailCell(repo model.Repo) string {
 	parts := append([]string(nil), repo.Status.Reasons...)
 	for _, diagnostic := range repo.Diagnostics {
+		message := diagnostic.Message
 		if diagnostic.Source == model.SourceLog {
-			parts = append(parts, diagnostic.Message+" (from logs)")
+			message += " (from logs)"
 		}
+		parts = append(parts, message)
 	}
 	parts = append(parts, repo.Errors...)
-	return strings.Join(parts, "; ")
+	seen := make(map[string]bool, len(parts))
+	unique := parts[:0]
+	for _, part := range parts {
+		if !seen[part] {
+			unique = append(unique, part)
+			seen[part] = true
+		}
+	}
+	return strings.Join(unique, "; ")
 }
 
 func truncateLabel(value string, limit int) string {

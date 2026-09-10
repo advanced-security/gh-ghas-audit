@@ -55,7 +55,7 @@ No mode triggers new CodeQL scans. The deprecated `--deep-diagnostics all|proble
 | --- | --- |
 | `--organization`, `--organizations`, `-o` | One or more organizations, comma separated |
 | `--enterprise`, `-e` | Discover every organization in an enterprise |
-| `--repository`, `-r` | A single `OWNER/REPO` |
+| `--repository`, `-r` | A single `OWNER/REPO`; cannot be combined with organization or enterprise scope |
 | `--match`, `--exclude` | Include/exclude repository-name globs |
 | `--visibility` | `public`, `private`, `internal` |
 | `--skip-archived`, `--skip-forks` | Exclude archived repositories or forks |
@@ -81,7 +81,7 @@ gh ghas-audit code-scanning -o my-org --match 'service-*' --exclude '*-sandbox'
 | Dimension | Values |
 | --- | --- |
 | `configuration` | `configured`, `not-configured`, `advanced-setup`, `attaching`, `updating`, `attach-failed`, `unavailable`, `unknown` |
-| `execution` | `success`, `failure`, `timed-out`, `cancelled`, `action-required`, `startup-failure`, `in-progress`, `queued`, `no-workflow`, `no-completed-run`, `not-applicable`, `not-evaluated`, `unknown` |
+| `execution` | `success`, `failure`, `timed-out`, `cancelled`, `action-required`, `startup-failure`, `in-progress`, `queued`, `disabled`, `no-workflow`, `no-completed-run`, `not-applicable`, `not-evaluated`, `unknown` |
 | `freshness` | `current`, `stale`, `never-scanned`, `not-applicable`, `not-evaluated`, `unknown` |
 | `coverage` | `complete`, `partial`, `gap`, `no-supported-languages`, `not-applicable`, `unknown` |
 

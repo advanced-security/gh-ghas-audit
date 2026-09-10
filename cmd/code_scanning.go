@@ -221,6 +221,9 @@ func (opts *codeScanningOptions) run(cmd *cobra.Command, _ []string) error {
 	}
 
 	organizations := splitList(opts.scope.organizations)
+	if opts.scope.repository != "" && (len(organizations) > 0 || opts.enterprise != "") {
+		return errors.New("--repository cannot be combined with --organization/--organizations or --enterprise")
+	}
 	if opts.enterprise == "" && len(organizations) == 0 && opts.scope.repository == "" {
 		return errors.New("specify --organization, --enterprise or --repository")
 	}
@@ -565,20 +568,26 @@ func parseDuration(value string) (time.Duration, error) {
 		return 0, errors.New("value is empty")
 	}
 	if match := durationPattern.FindStringSubmatch(value); match != nil {
-		amount, err := strconv.Atoi(match[1])
+		amount, err := strconv.ParseInt(match[1], 10, 64)
 		if err != nil {
 			return 0, err
 		}
+		var unit time.Duration
 		switch match[2] {
 		case "d":
-			return time.Duration(amount) * 24 * time.Hour, nil
+			unit = 24 * time.Hour
 		case "h":
-			return time.Duration(amount) * time.Hour, nil
+			unit = time.Hour
 		case "m":
-			return time.Duration(amount) * time.Minute, nil
+			unit = time.Minute
 		case "s":
-			return time.Duration(amount) * time.Second, nil
+			unit = time.Second
 		}
+		const maxDuration = time.Duration(1<<63 - 1)
+		if amount > int64(maxDuration/unit) {
+			return 0, fmt.Errorf("duration %q exceeds the maximum supported duration", value)
+		}
+		return time.Duration(amount) * unit, nil
 	}
 	parsed, err := time.ParseDuration(value)
 	if err != nil {
@@ -652,7 +661,11 @@ func parsePropertyFilters(values []string) (map[string][]string, error) {
 		if !found || name == "" {
 			return nil, fmt.Errorf("invalid --property-filter %q; expected NAME=VALUE", value)
 		}
-		filters[name] = append(filters[name], splitList(wanted)...)
+		patterns := splitList(wanted)
+		if err := validateGlobs(patterns, "--property-filter"); err != nil {
+			return nil, err
+		}
+		filters[name] = append(filters[name], patterns...)
 	}
 	return filters, nil
 }

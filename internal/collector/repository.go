@@ -3,6 +3,7 @@ package collector
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"regexp"
@@ -107,10 +108,9 @@ func (c *Collector) collectRepository(ctx context.Context, org string, source ap
 			}
 		}
 	}
-	// A missing or forbidden response is a durable fact about the repository,
-	// but anything else, including an exhausted rate limit, means the data is
-	// simply unknown and must be recorded as such.
-	if setupErr != nil && !ghapi.IsNotFound(setupErr) && !ghapi.IsForbidden(setupErr) {
+	// Missing or explicitly disabled features describe availability. Permission
+	// failures and transient errors leave evidence incomplete.
+	if setupErr != nil && !ghapi.IsNotFound(setupErr) && !featureUnavailable(setupErr) {
 		repo.Errors = append(repo.Errors, fmt.Sprintf("default setup: %v", setupErr))
 	}
 
@@ -200,6 +200,23 @@ type repoContext struct {
 	Properties        map[string]string
 	ConfigurationName string
 	AttachmentStatus  string
+}
+
+func featureUnavailable(err error) bool {
+	var status *ghapi.StatusError
+	if !ghapi.IsForbidden(err) || !errors.As(err, &status) {
+		return false
+	}
+	message := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(status.Message)), ".")
+	switch message {
+	case "advanced security must be enabled for this repository",
+		"advanced security must be enabled for this repository to use code scanning",
+		"code security must be enabled for this repository",
+		"code security must be enabled for this repository to use code scanning":
+		return true
+	default:
+		return false
+	}
 }
 
 func defaultBranchOf(source apiRepository) string {
@@ -576,11 +593,16 @@ func (c *Collector) collectExecution(
 	}
 	repo.Execution.WorkflowPath = workflowPath
 	repo.Execution.WorkflowState = workflowState
+	if !workflowActive(workflowState) {
+		repo.Status.Execution = model.ExecDisabled
+	}
 
 	runs, err := c.fetchRuns(ctx, org, name, workflowID, branch, "", runPageSize)
 	if err != nil {
 		repo.Errors = append(repo.Errors, fmt.Sprintf("workflow runs: %v", err))
-		repo.Status.Execution = model.ExecUnknown
+		if repo.Status.Execution != model.ExecDisabled {
+			repo.Status.Execution = model.ExecUnknown
+		}
 		return
 	}
 
@@ -612,7 +634,10 @@ func (c *Collector) collectExecution(
 	repo.Execution.LatestRun = toRunRef(latest)
 	repo.Execution.LatestCompletedRun = toRunRef(latestCompleted)
 	repo.Execution.LatestSuccessfulRun = toRunRef(latestSuccessful)
-	repo.Status.Execution = executionStatus(latest, latestCompleted)
+	execution := executionStatus(latest, latestCompleted)
+	if repo.Status.Execution != model.ExecDisabled || model.ExecutionFailed(execution) {
+		repo.Status.Execution = execution
+	}
 
 	if latestCompleted != nil {
 		c.collectJobs(ctx, org, name, latestCompleted.ID, repo, languages, evidence)
@@ -634,10 +659,16 @@ func (c *Collector) collectJobs(
 		url.PathEscape(org), url.PathEscape(name), runID)
 
 	var list jobList
-	if err := c.client.GetJSON(ctx, path, &list); err != nil {
-		if !ghapi.IsNotFound(err) {
-			repo.Errors = append(repo.Errors, fmt.Sprintf("run jobs: %v", err))
+	err := c.client.GetPaginatedJSON(ctx, path, func(page []byte) error {
+		var next jobList
+		if err := json.Unmarshal(page, &next); err != nil {
+			return err
 		}
+		list.Jobs = append(list.Jobs, next.Jobs...)
+		return nil
+	})
+	if err != nil {
+		repo.Errors = append(repo.Errors, fmt.Sprintf("run jobs: %v", err))
 		// Record the failure so per-language evidence is not reconstructed
 		// from CodeQL databases, which persist from earlier successful runs
 		// and would make a currently broken language look analyzed.
@@ -830,7 +861,7 @@ func (c *Collector) collectLanguageEvidence(
 
 	var databases []codeqlDatabase
 	if err := c.client.GetJSON(ctx, path, &databases); err != nil {
-		if !ghapi.IsNotFound(err) && !ghapi.IsForbidden(err) {
+		if !ghapi.IsNotFound(err) && !featureUnavailable(err) {
 			repo.Errors = append(repo.Errors, fmt.Sprintf("codeql databases: %v", err))
 		}
 		return

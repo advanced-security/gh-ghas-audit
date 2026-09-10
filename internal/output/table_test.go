@@ -71,6 +71,31 @@ func TestWriteTablePropagatesEveryWriteError(t *testing.T) {
 	}
 }
 
+func TestDetailedTableIncludesAllDiagnosticSources(t *testing.T) {
+	report := sampleReport()
+	repo := &report.Repositories[0]
+	repo.Status.Reasons = []string{"scanning needs attention"}
+	repo.Diagnostics = []model.Diagnostic{
+		{Source: model.SourceAPI, Code: "analysis-error", Message: "analysis failed: compilation error"},
+		{Source: model.SourceAPI, Code: "workflow-disabled", Message: "CodeQL workflow is disabled"},
+		{Source: model.SourceLog, Code: "log-warning", Message: "no source code was extracted"},
+		{Source: model.SourceAPI, Code: "analysis-error", Message: "analysis failed: compilation error"},
+		{Source: model.SourceAPI, Code: "summary", Message: "scanning needs attention"},
+	}
+	repo.Errors = []string{"run jobs: HTTP 403"}
+	want := "scanning needs attention; analysis failed: compilation error; CodeQL workflow is disabled; no source code was extracted (from logs); run jobs: HTTP 403"
+	if got := detailCell(*repo); got != want {
+		t.Fatalf("detail cell = %q, want %q", got, want)
+	}
+	var buffer bytes.Buffer
+	if err := WriteTable(&buffer, report, TableOptions{Width: 200, Detailed: true}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buffer.String(), want) {
+		t.Fatalf("detailed table lost diagnostic evidence:\n%s", buffer.String())
+	}
+}
+
 func TestWriteTableRespectsTerminalColors(t *testing.T) {
 	original := color.NoColor
 	color.NoColor = false

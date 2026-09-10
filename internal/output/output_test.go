@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/csv"
 	"encoding/json"
+	"io"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -173,6 +175,41 @@ func TestWriteNDJSONEmitsHeaderThenRepositories(t *testing.T) {
 		if record.Type != "repository" || record.FullName == "" {
 			t.Fatalf("unexpected repository record %+v", record)
 		}
+	}
+}
+
+func TestWriteNDJSONPreservesOrganizationErrorsWithoutRepositories(t *testing.T) {
+	report := &model.Report{
+		SchemaVersion: model.SchemaVersion,
+		Organizations: []model.OrgReport{
+			{Login: "unreadable", BySeverity: map[string]int{}, Error: "organization could not be read: 403 Forbidden"},
+		},
+		Stats: model.Stats{Incomplete: true},
+	}
+	var canonical, streamed bytes.Buffer
+	if err := WriteJSON(&canonical, report); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteNDJSON(&streamed, report); err != nil {
+		t.Fatal(err)
+	}
+	var want model.Report
+	if err := json.Unmarshal(canonical.Bytes(), &want); err != nil {
+		t.Fatal(err)
+	}
+	var header struct {
+		Type          string            `json:"type"`
+		Organizations []model.OrgReport `json:"organizations"`
+	}
+	decoder := json.NewDecoder(&streamed)
+	if err := decoder.Decode(&header); err != nil {
+		t.Fatal(err)
+	}
+	if header.Type != "report" || !reflect.DeepEqual(header.Organizations, want.Organizations) {
+		t.Fatalf("NDJSON header lost canonical organization data: %+v; want %+v", header, want.Organizations)
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		t.Fatalf("an empty report must emit only the header, got %v", err)
 	}
 }
 

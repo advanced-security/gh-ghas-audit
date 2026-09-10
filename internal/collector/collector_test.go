@@ -122,6 +122,9 @@ type scenario struct {
 	pushedAt time.Duration
 	// noPushedAt omits push history entirely.
 	noPushedAt bool
+	// languagesHasNext marks the language connection as truncated, so the
+	// collector falls back to REST.
+	languagesHasNext bool
 }
 
 const testOrg = "test-org"
@@ -154,7 +157,10 @@ func buildClient(t *testing.T, scenarios ...scenario) *fakeClient {
 			"visibility":       "PRIVATE",
 			"pushedAt":         pushedAt,
 			"defaultBranchRef": map[string]string{"name": "main"},
-			"languages":        map[string]any{"nodes": languageNodes},
+			"languages": map[string]any{
+				"nodes":    languageNodes,
+				"pageInfo": map[string]any{"hasNextPage": item.languagesHasNext},
+			},
 		})
 	}
 

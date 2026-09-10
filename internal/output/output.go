@@ -222,6 +222,8 @@ var languageCSVHeader = []string{
 	"Results",
 	"Analysis error",
 	"Repository overall status",
+	"Evidence complete",
+	"Collection errors",
 	"Job URL",
 }
 
@@ -261,6 +263,10 @@ func WriteLanguageCSV(writer io.Writer, report *model.Report, propertyColumns []
 				formatCount(state.ResultsCount),
 				state.AnalysisError,
 				string(repo.Status.Overall),
+				// Without these, Analyzed=false reads as an observed fact even
+				// when the evidence simply could not be retrieved.
+				strconv.FormatBool(!repo.Status.Incomplete),
+				strings.Join(repo.Errors, "; "),
 				state.JobURL,
 			}
 			for _, property := range propertyColumns {

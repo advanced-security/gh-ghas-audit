@@ -31,6 +31,10 @@ type apiRepository struct {
 	// activity and would apply the permissive inactive staleness threshold to
 	// a repository that GitHub still scans weekly.
 	LastActivityAt *time.Time
+	// InventoryErrors carries failures from enumeration into the repository
+	// record, so evidence that could not be read is reported rather than
+	// silently reducing what the scan claims to have checked.
+	InventoryErrors []string
 }
 
 // restRepository is a repository as returned by the REST repos endpoints. It

@@ -346,6 +346,14 @@ func (c *Client) get(ctx context.Context, pathOrURL string, useCache bool, limit
 
 		case status == http.StatusForbidden || status == http.StatusTooManyRequests:
 			wait, isRateLimit := rateLimitDelay(headers, body)
+			// 429 is a rate limit by definition. When GitHub omits usable
+			// headers or returns an unexpected body, falling through to the
+			// ordinary error path would retire the request without a retry and
+			// let a throttle be recorded as a repository fact.
+			if status == http.StatusTooManyRequests && !isRateLimit {
+				isRateLimit = true
+				wait = defaultSecondaryWait
+			}
 			if !isRateLimit {
 				return nil, "", newStatusError(status, body, target, false)
 			}

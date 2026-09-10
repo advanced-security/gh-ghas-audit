@@ -347,6 +347,13 @@ func classify(status *Status, hasWarning bool) (Severity, []string) {
 		return SeverityStalled, reasons
 	}
 
+	// Execution could not be determined, so nothing downstream of it can be
+	// asserted. Without this, an unreadable workflow list produces a confident
+	// "never scanned" verdict out of evidence that was never obtained.
+	if status.Execution == ExecUnknown {
+		return SeverityUnknown, []string{"the state of the analysis run could not be determined"}
+	}
+
 	if status.Freshness == FreshNever {
 		if status.Coverage == CoverageNoSupportedLanguages {
 			return SeverityNotApplicable, []string{

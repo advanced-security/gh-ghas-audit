@@ -44,9 +44,22 @@ type TableOptions struct {
 	Detailed bool
 }
 
+// colorFor builds a color bound to the caller's terminal decision. fatih/color
+// otherwise decides from the process stdout, so writing a table to a file while
+// attached to a terminal would embed ANSI escapes in the file.
+func colorFor(isTerminal bool, attributes ...color.Attribute) *color.Color {
+	value := color.New(attributes...)
+	if isTerminal {
+		value.EnableColor()
+	} else {
+		value.DisableColor()
+	}
+	return value
+}
+
 // WriteTable renders a summary followed by a repository table.
 func WriteTable(writer io.Writer, report *model.Report, opts TableOptions) error {
-	writeSummary(writer, report)
+	writeSummary(writer, report, opts.IsTerminal)
 
 	if len(report.Repositories) == 0 {
 		fmt.Fprintln(writer, "\nNo repositories matched the current scope and filters.")
@@ -54,12 +67,12 @@ func WriteTable(writer io.Writer, report *model.Report, opts TableOptions) error
 		// incomplete-report notice, and without them a scan in which every
 		// organization failed is indistinguishable from one that legitimately
 		// matched nothing.
-		writeFooter(writer, report)
+		writeFooter(writer, report, opts.IsTerminal)
 		return nil
 	}
 
 	printer := tableprinter.New(writer, opts.IsTerminal, opts.Width)
-	headerColor := wrap(color.New(color.FgHiWhite, color.Bold))
+	headerColor := wrap(colorFor(opts.IsTerminal, color.FgHiWhite, color.Bold))
 
 	// "HEALTH" rather than "STATUS" because the report exposes four distinct
 	// status dimensions, and because organizations often define a custom
@@ -98,12 +111,12 @@ func WriteTable(writer io.Writer, report *model.Report, opts TableOptions) error
 		return err
 	}
 
-	writeFooter(writer, report)
+	writeFooter(writer, report, opts.IsTerminal)
 	return nil
 }
 
-func writeSummary(writer io.Writer, report *model.Report) {
-	bold := color.New(color.Bold)
+func writeSummary(writer io.Writer, report *model.Report, isTerminal bool) {
+	bold := colorFor(isTerminal, color.Bold)
 	scope := report.Scope.Repository
 	if scope == "" && report.Scope.Enterprise != "" {
 		scope = fmt.Sprintf("enterprise %s (%d organizations)", report.Scope.Enterprise, len(report.Scope.Organizations))
@@ -115,7 +128,7 @@ func writeSummary(writer io.Writer, report *model.Report) {
 	fmt.Fprintf(writer, "\n%s\n", bold.Sprintf("Code scanning status: %s", scope))
 	fmt.Fprintf(writer, "%d repositories, %s needing attention. Scans are stale after %s for active repositories",
 		report.Summary.TotalRepositories,
-		color.New(attentionColor(report.Summary.NeedsAttention)).Sprintf("%d", report.Summary.NeedsAttention),
+		colorFor(isTerminal, attentionColor(report.Summary.NeedsAttention)).Sprintf("%d", report.Summary.NeedsAttention),
 		report.Settings.StaleAfter)
 	if report.Settings.StaleAfterInactive != "" {
 		fmt.Fprintf(writer, " and %s for inactive ones", report.Settings.StaleAfterInactive)
@@ -153,7 +166,7 @@ func writeSummary(writer io.Writer, report *model.Report) {
 			fmt.Fprintf(writer, "  %-30s %3d repositories, %s needing attention\n",
 				truncateLabel(group.Value, 30),
 				group.Repositories,
-				color.New(attentionColor(group.NeedsAttention)).Sprintf("%d", group.NeedsAttention))
+				colorFor(isTerminal, attentionColor(group.NeedsAttention)).Sprintf("%d", group.NeedsAttention))
 		}
 		if len(report.Summary.Groups) > len(groups) {
 			fmt.Fprintf(writer, "  ... and %d more groups\n", len(report.Summary.Groups)-len(groups))
@@ -163,16 +176,16 @@ func writeSummary(writer io.Writer, report *model.Report) {
 	fmt.Fprintln(writer)
 }
 
-func writeFooter(writer io.Writer, report *model.Report) {
+func writeFooter(writer io.Writer, report *model.Report, isTerminal bool) {
 	if len(report.Warnings) > 0 {
-		fmt.Fprintf(writer, "\n%s\n", color.New(color.FgYellow, color.Bold).Sprint("Warnings"))
+		fmt.Fprintf(writer, "\n%s\n", colorFor(isTerminal, color.FgYellow, color.Bold).Sprint("Warnings"))
 		for _, warning := range report.Warnings {
 			fmt.Fprintf(writer, "  - %s\n", warning)
 		}
 	}
 
 	if report.Stats.Incomplete {
-		fmt.Fprintf(writer, "\n%s\n", color.New(color.FgYellow).Sprint(
+		fmt.Fprintf(writer, "\n%s\n", colorFor(isTerminal, color.FgYellow).Sprint(
 			"This report is incomplete. Absence of a problem here does not prove absence of a problem."))
 	}
 
@@ -308,10 +321,13 @@ func detailCell(repo model.Repo) string {
 }
 
 func truncateLabel(value string, limit int) string {
-	if len(value) <= limit {
+	runes := []rune(value)
+	if len(runes) <= limit {
 		return value
 	}
-	return value[:limit-3] + "..."
+	// Truncating by byte would cut a multibyte character in half and emit
+	// invalid UTF-8 into the terminal.
+	return string(runes[:limit-3]) + "..."
 }
 
 func wrap(colour *color.Color) func(string) string {

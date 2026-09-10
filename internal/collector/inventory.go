@@ -178,9 +178,15 @@ func (c *Collector) listRepositories(ctx context.Context, org string) ([]apiRepo
 
 			// The languages connection is capped. On the rare repository that
 			// exceeds it, fall back to REST rather than let a supported
-			// language go unseen and report coverage as complete.
+			// language go unseen and report coverage as complete. If that
+			// fallback also fails, the truncated list must not be presented
+			// as the whole picture.
 			if repo.Languages.PageInfo.HasNextPage {
-				if names, err := c.repositoryLanguages(ctx, org, repo.Name); err == nil {
+				names, err := c.repositoryLanguages(ctx, org, repo.Name)
+				if err != nil {
+					repo.InventoryErrors = append(repo.InventoryErrors,
+						fmt.Sprintf("languages: the list was truncated and could not be completed: %v", err))
+				} else {
 					repo.Languages.Nodes = names
 				}
 			}
@@ -254,7 +260,39 @@ func (c *Collector) getRepository(ctx context.Context, org, name string) (apiRep
 	}
 	repo.Languages.Nodes = names
 
+	// Inactivity must be judged the same way as in organization enumeration.
+	// Using pushedAt alone here would give a repository kept alive by fork
+	// pull requests the permissive monthly threshold and hide an overdue
+	// weekly scan, purely because of which code path fetched it.
+	if updated, err := c.latestPullRequestUpdate(ctx, org, name); err != nil {
+		repo.InventoryErrors = append(repo.InventoryErrors,
+			fmt.Sprintf("pull requests: activity could not be read: %v", err))
+	} else if updated != nil && (repo.LastActivityAt == nil || updated.After(*repo.LastActivityAt)) {
+		repo.LastActivityAt = updated
+	}
+
 	return repo, nil
+}
+
+// latestPullRequestUpdate returns when the most recently updated pull request
+// changed, which counts as repository activity for scan scheduling.
+func (c *Collector) latestPullRequestUpdate(ctx context.Context, org, name string) (*time.Time, error) {
+	path := fmt.Sprintf("repos/%s/%s/pulls?state=all&sort=updated&direction=desc&per_page=1",
+		url.PathEscape(org), url.PathEscape(name))
+
+	var pulls []struct {
+		UpdatedAt *time.Time `json:"updated_at"`
+	}
+	if err := c.client.GetJSON(ctx, path, &pulls); err != nil {
+		if ghapi.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if len(pulls) == 0 {
+		return nil, nil
+	}
+	return pulls[0].UpdatedAt, nil
 }
 
 // configurationIndex maps repository name to its security configuration

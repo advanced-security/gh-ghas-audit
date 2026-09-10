@@ -55,6 +55,9 @@ func (c *Collector) collectRepository(ctx context.Context, org string, source ap
 		// requests is not given the permissive inactive threshold.
 		LastActivityAt: source.LastActivityAt,
 		Properties:     extra.Properties,
+		// Failures recorded while enumerating carry through, so a truncated
+		// language list is never presented as complete evidence.
+		Errors: append([]string(nil), source.InventoryErrors...),
 	}
 	if repo.URL == "" {
 		repo.URL = fmt.Sprintf("https://%s/%s/%s", c.client.Host(), org, source.Name)
@@ -390,14 +393,27 @@ func (c *Collector) collectAnalyses(ctx context.Context, org, name, branch strin
 	}
 
 	report := &analysisReport{Languages: map[model.Language]*analysisSummary{}}
+
+	// The newest analysis names the workflow currently producing results,
+	// which is how an advanced setup workflow is found. Everything else is
+	// then read from that workflow only: a repository can carry analyses from
+	// more than one CodeQL workflow, and letting a different one supply
+	// freshness, success or an error would attribute another workflow's
+	// results to the one being assessed.
+	for index := range analyses {
+		if analyses[index].CreatedAt == nil {
+			continue
+		}
+		report.Newest = analyses[index].CreatedAt
+		report.WorkflowPath = workflowPathFromAnalysisKey(analyses[index].AnalysisKey)
+		report.DefaultSetup = report.WorkflowPath == codeqlWorkflowPath
+		break
+	}
+
 	for index := range analyses {
 		analysis := &analyses[index]
-		if report.Newest == nil && analysis.CreatedAt != nil {
-			report.Newest = analysis.CreatedAt
-			// The newest analysis names the workflow currently producing
-			// results, which is how an advanced setup workflow is found.
-			report.WorkflowPath = workflowPathFromAnalysisKey(analysis.AnalysisKey)
-			report.DefaultSetup = report.WorkflowPath == codeqlWorkflowPath
+		if workflowPathFromAnalysisKey(analysis.AnalysisKey) != report.WorkflowPath {
+			continue
 		}
 
 		match := analysisCategoryPattern.FindStringSubmatch(analysis.Category)
@@ -683,8 +699,11 @@ func (c *Collector) findCodeQLWorkflow(ctx context.Context, org, name, wantPath 
 		return nil
 	})
 	if err != nil {
-		if ghapi.IsNotFound(err) || ghapi.IsForbidden(err) {
-			// Actions can be disabled for the repository or organization.
+		// A 404 means Actions is genuinely absent for this repository, which
+		// is a real answer. A 403 is not: it can mean Actions is disabled, but
+		// equally that the token cannot read it. Treating those alike would
+		// turn a missing permission into a confident "never scanned" verdict.
+		if ghapi.IsNotFound(err) {
 			return 0, "", false, nil
 		}
 		return 0, "", false, err

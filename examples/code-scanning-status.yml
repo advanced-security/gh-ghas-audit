@@ -64,7 +64,8 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
-          # Pin to a release tag so scheduled runs stay reproducible.
+          # Installs the latest release. Append --pin <tag> to hold scheduled
+          # runs on a known version.
           gh extension install advanced-security/gh-ghas-audit
 
       - name: Generate the status report

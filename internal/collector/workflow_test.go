@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/advanced-security/gh-ghas-audit/internal/model"
+	"github.com/advanced-security/gh-ghas-audit/v2/internal/model"
 )
 
 // workflowWithState builds a workflow listing whose managed CodeQL entry has a

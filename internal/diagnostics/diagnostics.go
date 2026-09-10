@@ -1,5 +1,5 @@
 // Package diagnostics implements the opt-in, best-effort inspection of Actions
-// logs used by --deep-diagnostics.
+// logs used by --scan-depth diagnostics.
 //
 // GitHub does not expose code scanning tool status page warnings through any
 // documented REST or GraphQL API. The only remaining source for messages such
@@ -30,8 +30,8 @@ import (
 	"strings"
 	"sync/atomic"
 
-	"github.com/advanced-security/gh-ghas-audit/internal/ghapi"
-	"github.com/advanced-security/gh-ghas-audit/internal/model"
+	"github.com/advanced-security/gh-ghas-audit/v2/internal/ghapi"
+	"github.com/advanced-security/gh-ghas-audit/v2/internal/model"
 )
 
 // Defaults chosen to keep an opt-in diagnostic pass bounded even when a user
@@ -236,12 +236,21 @@ var knownPatterns = []pattern{
 
 // Fetcher downloads and inspects Actions logs within configured limits.
 type Fetcher struct {
-	client *ghapi.Client
-	limits Limits
+	client       logClient
+	limits       Limits
+	downloadSlot chan struct{}
 
 	inspected atomic.Int64
 	bytesRead atomic.Int64
 }
+
+type logClient interface {
+	GetBytesLimited(context.Context, string, int64) ([]byte, error)
+	Host() string
+}
+
+// ErrBudgetExhausted distinguishes an uninspected archive from a clean one.
+var ErrBudgetExhausted = errors.New("log inspection budget exhausted")
 
 // Limits bounds the work a diagnostic pass may perform.
 type Limits struct {
@@ -254,7 +263,7 @@ type Limits struct {
 }
 
 // NewFetcher creates a Fetcher with sane defaults applied to zero values.
-func NewFetcher(client *ghapi.Client, limits Limits) *Fetcher {
+func NewFetcher(client logClient, limits Limits) *Fetcher {
 	if limits.MaxRepositories <= 0 {
 		limits.MaxRepositories = defaultMaxRepositories
 	}
@@ -264,7 +273,7 @@ func NewFetcher(client *ghapi.Client, limits Limits) *Fetcher {
 	if limits.MaxExcerpt <= 0 {
 		limits.MaxExcerpt = defaultMaxExcerpt
 	}
-	return &Fetcher{client: client, limits: limits}
+	return &Fetcher{client: client, limits: limits, downloadSlot: make(chan struct{}, 1)}
 }
 
 // Budget reports whether the fetcher has exhausted its limits, and a message
@@ -312,12 +321,24 @@ func (f *Fetcher) remainingBytes() int64 {
 
 // Inspect downloads the log archive for a run and returns any findings.
 func (f *Fetcher) Inspect(ctx context.Context, org, repo string, runID int64) ([]model.Diagnostic, error) {
-	remaining := f.remainingBytes()
-	if remaining <= 0 {
-		return nil, nil
+	// Archive sizes are unknown until downloaded. Serialize downloads so
+	// concurrent workers cannot each spend the same remaining byte budget.
+	select {
+	case f.downloadSlot <- struct{}{}:
+		defer func() { <-f.downloadSlot }()
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if exhausted, message := f.Budget(); exhausted {
+		return nil, fmt.Errorf("%w: %s", ErrBudgetExhausted, message)
+	}
+	remaining := f.remainingBytes()
 	if !f.reserve() {
-		return nil, nil
+		return nil, fmt.Errorf("%w: maximum of %d repositories inspected",
+			ErrBudgetExhausted, f.limits.MaxRepositories)
 	}
 
 	logPath := fmt.Sprintf("repos/%s/%s/actions/runs/%d/logs",
@@ -333,12 +354,11 @@ func (f *Fetcher) Inspect(ctx context.Context, org, repo string, runID int64) ([
 		// inspection stopped.
 		if errors.Is(err, ghapi.ErrResponseTooLarge) {
 			f.bytesRead.Store(f.limits.MaxBytes)
-			return nil, nil
+			return nil, fmt.Errorf("%w: archive exceeds the remaining byte budget; raise --deep-diagnostics-max-mb",
+				ErrBudgetExhausted)
 		}
 		if ghapi.IsNotFound(err) || ghapi.IsForbidden(err) {
-			// Logs expire and can be restricted. An absent archive is not a
-			// failure worth stopping the scan for.
-			return nil, nil
+			return nil, fmt.Errorf("logs are unavailable or access is denied: %w", err)
 		}
 		return nil, err
 	}

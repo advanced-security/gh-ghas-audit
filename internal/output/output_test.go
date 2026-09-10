@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/advanced-security/gh-ghas-audit/internal/model"
+	"github.com/advanced-security/gh-ghas-audit/v2/internal/model"
 )
 
 func sampleReport() *model.Report {

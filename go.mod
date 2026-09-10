@@ -1,4 +1,4 @@
-module github.com/advanced-security/gh-ghas-audit
+module github.com/advanced-security/gh-ghas-audit/v2
 
 go 1.23.0
 

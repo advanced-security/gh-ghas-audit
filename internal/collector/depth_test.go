@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/advanced-security/gh-ghas-audit/internal/model"
+	"github.com/advanced-security/gh-ghas-audit/v2/internal/model"
 )
 
 // The default setup endpoint answers even when default setup is off, and the
@@ -157,5 +157,26 @@ func TestConfigDepthDoesNotFetchRuntimeEvidence(t *testing.T) {
 				t.Errorf("config depth requested runtime evidence: %s", request)
 			}
 		}
+	}
+}
+
+func TestUnconfiguredGapsPersistAcrossDepths(t *testing.T) {
+	for _, depth := range []Depth{DepthConfig, DepthHealth, DepthDiagnostics} {
+		t.Run(string(depth), func(t *testing.T) {
+			client := buildClient(t, scenario{
+				name: "java-app", languages: []string{"Java", "TypeScript", "JavaScript"},
+				defaultSetup: defaultSetup{State: "not-configured", Languages: []string{"java-kotlin", "javascript-typescript"}},
+			})
+			options := defaultActivityOptions()
+			options.Depth = depth
+			repo := findRepo(t, collect(t, client, options), "java-app")
+			if len(repo.ConfiguredLanguages) != 0 {
+				t.Fatalf("unconfigured repository invented configuration: %v", repo.ConfiguredLanguages)
+			}
+			if len(repo.MissingLanguages) != 2 || !containsLanguage(repo.MissingLanguages, model.LangJavaKotlin) ||
+				!containsLanguage(repo.MissingLanguages, model.LangJavaScriptTypeScript) {
+				t.Fatalf("depth %s lost normalized rollout gaps: %v", depth, repo.MissingLanguages)
+			}
+		})
 	}
 }

@@ -1,9 +1,9 @@
 package cmd
 
 import (
-	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -17,20 +17,20 @@ import (
 	"github.com/cli/go-gh/v2/pkg/term"
 	"github.com/spf13/cobra"
 
-	"github.com/advanced-security/gh-ghas-audit/internal/cache"
-	"github.com/advanced-security/gh-ghas-audit/internal/collector"
-	"github.com/advanced-security/gh-ghas-audit/internal/diagnostics"
-	"github.com/advanced-security/gh-ghas-audit/internal/ghapi"
-	"github.com/advanced-security/gh-ghas-audit/internal/model"
-	"github.com/advanced-security/gh-ghas-audit/internal/output"
+	"github.com/advanced-security/gh-ghas-audit/v2/internal/cache"
+	"github.com/advanced-security/gh-ghas-audit/v2/internal/collector"
+	"github.com/advanced-security/gh-ghas-audit/v2/internal/diagnostics"
+	"github.com/advanced-security/gh-ghas-audit/v2/internal/ghapi"
+	"github.com/advanced-security/gh-ghas-audit/v2/internal/model"
+	"github.com/advanced-security/gh-ghas-audit/v2/internal/output"
 )
 
 // ExitCodeFailOn is returned when --fail-on matches, so scheduled workflows
 // can distinguish a policy failure from a tool error.
 const ExitCodeFailOn = 2
 
-// statusOptions holds every flag for the status command.
-type statusOptions struct {
+type codeScanningOptions struct {
+	scope      *scopeOptions
 	enterprise string
 	format     string
 	outputPath string
@@ -57,189 +57,177 @@ type statusOptions struct {
 
 	failOn []string
 
-	scanDepth          string
-	deepScope          string
-	deepDiagnostics    string
-	deepMaxRepos       int
-	deepMaxMegabytes   int
-	detailed           bool
-	quiet              bool
-	includeUnsupported bool
+	scanDepth        string
+	deepScope        string
+	deepDiagnostics  string
+	deepMaxRepos     int
+	deepMaxMegabytes int
+	detailed         bool
+	quiet            bool
 }
 
-var statusOpts statusOptions
+func newCodeScanningCommand(scope *scopeOptions) *cobra.Command {
+	opts := &codeScanningOptions{scope: scope}
+	cmd := &cobra.Command{
+		Use:   "code-scanning",
+		Short: "Report code scanning health across organizations and enterprises",
+		Long: `Audit CodeQL configuration, execution, freshness and language coverage.
 
-var codeScanningStatusCmd = &cobra.Command{
-	Use:   "status",
-	Short: "Report code scanning health across organizations and enterprises",
-	Long: `Report code scanning health across organizations and enterprises.
-
-Reports whether CodeQL default setup is configured, whether analysis runs are
-actually succeeding, when each repository last scanned successfully, and which
-languages are configured but not being analyzed.
-
-Status is reported across four independent dimensions, because a single
-pass or fail hides the problems customers care about:
-
-  configuration  is code scanning set up, and did the security configuration attach
-  execution      did the most recent analysis run succeed, fail, or never run
-  freshness      how long ago the last successful analysis completed
-  coverage       are all supported languages actually being analyzed
+All depths use the same collector, filters, cache and output formats:
+  config       configuration-only audit (no runtime health verdict)
+  health       API-based health assessment (default)
+  diagnostics  health plus best-effort Actions log inspection
 
 Examples:
-  # One organization, human-readable summary
-  gh ghas-audit code-scanning status --organization my-org
+  gh ghas-audit code-scanning --organization my-org
+  gh ghas-audit code-scanning --enterprise my-enterprise --scan-depth config
+  gh ghas-audit code-scanning -r owner/repo --scan-depth diagnostics --deep-scope all
+  gh ghas-audit code-scanning -o my-org --format csv --output report.csv
+  gh ghas-audit code-scanning -o my-org --fail-on failing,stalled`,
+		Args: cobra.NoArgs,
+		RunE: opts.run,
+	}
+	flags := cmd.Flags()
 
-  # A whole enterprise, exported for reporting
-  gh ghas-audit code-scanning status --enterprise my-enterprise --format csv --output status.csv
-
-  # Only the repositories that need attention, grouped by application
-  gh ghas-audit code-scanning status --organization my-org \
-    --status failing,stalled,stale --group-by-property application
-
-  # Per-language coverage gaps
-  gh ghas-audit code-scanning status --organization my-org --format language-csv --output languages.csv
-
-  # Fail a scheduled workflow when anything is broken
-  gh ghas-audit code-scanning status --organization my-org --fail-on failing,stalled`,
-	RunE: runCodeScanningStatus,
-}
-
-func init() {
-	flags := codeScanningStatusCmd.Flags()
-
-	flags.StringVarP(&statusOpts.enterprise, "enterprise", "e", "",
+	flags.StringVarP(&opts.enterprise, "enterprise", "e", "",
 		"Enterprise slug to scan; expands to every organization in the enterprise")
-	flags.StringVar(&statusOpts.format, "format", "table",
+	flags.StringVar(&opts.format, "format", "table",
 		"Output format: table, json, ndjson, csv or language-csv")
-	flags.StringVar(&statusOpts.outputPath, "output", "",
+	flags.StringVar(&opts.outputPath, "output", "",
 		"Write output to a file instead of stdout")
 
-	flags.StringVar(&statusOpts.staleAfter, "stale-after", "8d",
-		"Age after which an active repository's scan is stale (default setup scans weekly, so this allows a one day buffer)")
-	flags.StringVar(&statusOpts.staleAfterInactive, "stale-after-inactive", "32d",
-		"Age after which an inactive repository's scan is stale. GitHub scans repositories with no recent pushes every 30 days")
-	flags.StringVar(&statusOpts.inactiveAfter, "inactive-after", "180d",
-		"Time without a push after which a repository counts as inactive and uses the monthly threshold")
-	flags.StringSliceVar(&statusOpts.activityFilter, "activity", nil,
+	flags.StringVar(&opts.staleAfter, "stale-after", "8d",
+		"Scan freshness threshold for active repositories")
+	flags.StringVar(&opts.staleAfterInactive, "stale-after-inactive", "32d",
+		"Scan freshness threshold for inactive repositories")
+	flags.StringVar(&opts.inactiveAfter, "inactive-after", "180d",
+		"Time without a push or pull request update before a repository is inactive")
+	flags.StringSliceVar(&opts.activityFilter, "activity", nil,
 		"Only report repositories with this activity: active or inactive")
 
-	flags.StringSliceVar(&statusOpts.properties, "property", nil,
+	flags.StringSliceVar(&opts.properties, "property", nil,
 		"Custom property to include as a column (repeatable)")
-	flags.StringVar(&statusOpts.groupByProperty, "group-by-property", "",
+	flags.StringVar(&opts.groupByProperty, "group-by-property", "",
 		"Group summary counts by a custom property, such as an application name")
-	flags.StringSliceVar(&statusOpts.propertyFilters, "property-filter", nil,
+	flags.StringSliceVar(&opts.propertyFilters, "property-filter", nil,
 		"Only include repositories whose custom property matches, as NAME=VALUE (repeatable, supports * wildcards)")
 
-	flags.StringSliceVar(&statusOpts.statusFilter, "status", nil,
+	flags.StringSliceVar(&opts.statusFilter, "status", nil,
 		"Only report repositories with these overall statuses (repeatable)")
-	flags.StringSliceVar(&statusOpts.languageFilter, "language", nil,
+	flags.StringSliceVar(&opts.languageFilter, "language", nil,
 		"Only report repositories involving these CodeQL languages (repeatable)")
-	flags.StringSliceVar(&statusOpts.visibilityFilter, "visibility", nil,
+	flags.StringSliceVar(&opts.visibilityFilter, "visibility", nil,
 		"Only scan repositories with these visibilities: public, private, internal")
-	flags.StringSliceVar(&statusOpts.nameFilter, "match", nil,
+	flags.StringSliceVar(&opts.nameFilter, "match", nil,
 		"Only scan repositories whose name matches these glob patterns (repeatable)")
-	flags.StringSliceVar(&statusOpts.excludeFilter, "exclude", nil,
+	flags.StringSliceVar(&opts.excludeFilter, "exclude", nil,
 		"Skip repositories whose name matches these glob patterns (repeatable)")
 
-	flags.IntVar(&statusOpts.concurrency, "concurrency", 8,
+	flags.IntVar(&opts.concurrency, "concurrency", 8,
 		"Maximum concurrent API requests; higher values scan faster but risk secondary rate limits")
 
-	flags.StringVar(&statusOpts.cacheDir, "cache-dir", "",
+	flags.StringVar(&opts.cacheDir, "cache-dir", "",
 		"Directory for the conditional request cache; defaults to the user cache directory")
-	flags.BoolVar(&statusOpts.noCache, "no-cache", false,
+	flags.BoolVar(&opts.noCache, "no-cache", false,
 		"Disable the conditional request cache")
-	flags.BoolVar(&statusOpts.refresh, "refresh", false,
+	flags.BoolVar(&opts.refresh, "refresh", false,
 		"Discard cached responses before scanning")
-	flags.StringVar(&statusOpts.cacheMaxAge, "cache-max-age", "",
+	flags.StringVar(&opts.cacheMaxAge, "cache-max-age", "",
 		"Ignore cached responses older than this, for example 24h")
 
-	flags.StringSliceVar(&statusOpts.failOn, "fail-on", nil,
+	flags.StringSliceVar(&opts.failOn, "fail-on", nil,
 		"Exit with code 2 when any repository has one of these statuses, for use in scheduled workflows")
 
-	flags.StringVar(&statusOpts.scanDepth, "scan-depth", "health",
-		"How much evidence to gather: 'config' (configuration only, cheapest, never reports healthy), "+
-			"'health' (adds runs, jobs and analyses), or 'diagnostics' (adds Actions log parsing, slow and best effort)")
-	flags.StringVar(&statusOpts.deepScope, "deep-scope", "all",
-		"At diagnostics depth, which repositories to inspect logs for: 'all' or 'problematic'. "+
-			"'problematic' skips repositories that already look healthy, so it can explain a failure but cannot discover one")
+	flags.StringVar(&opts.scanDepth, "scan-depth", "health",
+		"Evidence depth: config, health or diagnostics")
+	flags.StringVar(&opts.deepScope, "deep-scope", "all",
+		"Log selection at diagnostics depth: all or problematic (skips apparently healthy repositories)")
 
-	flags.StringVar(&statusOpts.deepDiagnostics, "deep-diagnostics", "",
+	flags.StringVar(&opts.deepDiagnostics, "deep-diagnostics", "",
 		"Deprecated, use --scan-depth diagnostics with --deep-scope")
 	_ = flags.MarkDeprecated("deep-diagnostics", "use --scan-depth diagnostics with --deep-scope")
-	flags.IntVar(&statusOpts.deepMaxRepos, "deep-diagnostics-max-repos", 200,
+	flags.IntVar(&opts.deepMaxRepos, "deep-diagnostics-max-repos", 200,
 		"Maximum repositories to inspect at diagnostics depth")
-	flags.IntVar(&statusOpts.deepMaxMegabytes, "deep-diagnostics-max-mb", 32,
-		"Maximum megabytes of logs to download at diagnostics depth")
+	flags.IntVar(&opts.deepMaxMegabytes, "deep-diagnostics-max-mb", 32,
+		"Total compressed log download budget in MiB")
 
-	flags.BoolVar(&statusOpts.detailed, "detailed", false,
+	flags.BoolVar(&opts.detailed, "detailed", false,
 		"Add a detail column explaining why each repository has its status")
-	flags.BoolVar(&statusOpts.quiet, "quiet", false,
+	flags.BoolVar(&opts.quiet, "quiet", false,
 		"Suppress progress output")
 
-	codeScanningAuditCmd.AddCommand(codeScanningStatusCmd)
+	return cmd
 }
 
-func runCodeScanningStatus(cmd *cobra.Command, _ []string) error {
+func (opts *codeScanningOptions) run(cmd *cobra.Command, _ []string) error {
 	// Flags parsed successfully, so any later failure is a runtime problem
 	// rather than a usage error and should not print the whole flag list.
 	cmd.SilenceUsage = true
 
-	format, err := output.ParseFormat(statusOpts.format)
+	format, err := output.ParseFormat(opts.format)
 	if err != nil {
 		return err
 	}
 
-	staleAfter, err := parseDuration(statusOpts.staleAfter)
+	staleAfter, err := parseDuration(opts.staleAfter)
 	if err != nil {
 		return fmt.Errorf("invalid --stale-after: %w", err)
 	}
-	staleAfterInactive, err := parseDuration(statusOpts.staleAfterInactive)
+	staleAfterInactive, err := parseDuration(opts.staleAfterInactive)
 	if err != nil {
 		return fmt.Errorf("invalid --stale-after-inactive: %w", err)
 	}
-	inactiveAfter, err := parseDuration(statusOpts.inactiveAfter)
+	inactiveAfter, err := parseDuration(opts.inactiveAfter)
 	if err != nil {
 		return fmt.Errorf("invalid --inactive-after: %w", err)
 	}
-	activityFilter, err := parseActivities(statusOpts.activityFilter)
+	activityFilter, err := parseActivities(opts.activityFilter)
 	if err != nil {
 		return err
 	}
 
-	statusFilter, err := parseSeverities(statusOpts.statusFilter, "--status")
+	statusFilter, err := parseSeverities(opts.statusFilter, "--status")
 	if err != nil {
 		return err
 	}
-	failOn, err := parseSeverities(statusOpts.failOn, "--fail-on")
+	failOn, err := parseSeverities(opts.failOn, "--fail-on")
 	if err != nil {
 		return err
 	}
-	languageFilter, err := parseLanguages(statusOpts.languageFilter)
+	languageFilter, err := parseLanguages(opts.languageFilter)
 	if err != nil {
 		return err
 	}
-	propertyFilters, err := parsePropertyFilters(statusOpts.propertyFilters)
+	propertyFilters, err := parsePropertyFilters(opts.propertyFilters)
 	if err != nil {
 		return err
 	}
 	depth, deepMode, err := resolveDepth(
-		statusOpts.scanDepth, statusOpts.deepScope, statusOpts.deepDiagnostics,
+		opts.scanDepth, opts.deepScope, opts.deepDiagnostics,
 		cmd.Flags().Changed("scan-depth"))
 	if err != nil {
 		return err
 	}
 
-	organizations := splitList(Organizations)
-	if statusOpts.enterprise == "" && len(organizations) == 0 && Repository == "" {
+	organizations := splitList(opts.scope.organizations)
+	if opts.enterprise == "" && len(organizations) == 0 && opts.scope.repository == "" {
 		return errors.New("specify --organization, --enterprise or --repository")
 	}
+	if opts.concurrency < 1 {
+		return errors.New("--concurrency must be at least 1")
+	}
+	if opts.deepMaxRepos < 1 || opts.deepMaxMegabytes < 1 {
+		return errors.New("--deep-diagnostics-max-repos and --deep-diagnostics-max-mb must be at least 1")
+	}
+	if int64(opts.deepMaxMegabytes) > (1<<63-1)>>20 {
+		return errors.New("--deep-diagnostics-max-mb is too large")
+	}
 
-	store, err := buildCache()
+	store, err := opts.buildCache(cmd.ErrOrStderr())
 	if err != nil {
 		return err
 	}
-	if statusOpts.refresh {
+	if opts.refresh {
 		if err := store.Clear(); err != nil {
 			return fmt.Errorf("clearing cache: %w", err)
 		}
@@ -247,38 +235,38 @@ func runCodeScanningStatus(cmd *cobra.Command, _ []string) error {
 
 	client, err := ghapi.NewClient(ghapi.Options{
 		Cache:       store,
-		Concurrency: statusOpts.concurrency,
+		Concurrency: opts.concurrency,
 	})
 	if err != nil {
 		return err
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	progress := func(message string) {
-		if !statusOpts.quiet {
-			fmt.Fprintln(os.Stderr, message)
+		if !opts.quiet {
+			fmt.Fprintln(cmd.ErrOrStderr(), message)
 		}
 	}
 
 	options := collector.Options{
-		Enterprise:            statusOpts.enterprise,
+		Enterprise:            opts.enterprise,
 		Organizations:         organizations,
-		Repository:            Repository,
-		SkipArchived:          SkipArchived,
-		SkipForks:             SkipForks,
-		SecurityConfiguration: SecurityConfiguration,
+		Repository:            opts.scope.repository,
+		SkipArchived:          opts.scope.skipArchived,
+		SkipForks:             opts.scope.skipForks,
+		SecurityConfiguration: opts.scope.securityConfiguration,
 		StaleAfter:            staleAfter,
 		StaleAfterInactive:    staleAfterInactive,
 		InactiveAfter:         inactiveAfter,
-		Concurrency:           statusOpts.concurrency,
-		Properties:            statusOpts.properties,
-		GroupByProperty:       statusOpts.groupByProperty,
+		Concurrency:           opts.concurrency,
+		Properties:            opts.properties,
+		GroupByProperty:       opts.groupByProperty,
 		PropertyFilters:       propertyFilters,
-		VisibilityFilter:      lowerAll(statusOpts.visibilityFilter),
-		NameFilter:            statusOpts.nameFilter,
-		ExcludeFilter:         statusOpts.excludeFilter,
+		VisibilityFilter:      lowerAll(opts.visibilityFilter),
+		NameFilter:            opts.nameFilter,
+		ExcludeFilter:         opts.excludeFilter,
 		Depth:                 depth,
 		DeepDiagnostics:       deepMode,
 		Progress:              progress,
@@ -288,8 +276,8 @@ func runCodeScanningStatus(cmd *cobra.Command, _ []string) error {
 		progress("Deep diagnostics enabled: Actions logs will be downloaded and parsed. " +
 			"This is best effort, considerably slower, and consumes significant rate limit budget.")
 		options.LogFetcher = diagnostics.NewFetcher(client, diagnostics.Limits{
-			MaxRepositories: statusOpts.deepMaxRepos,
-			MaxBytes:        int64(statusOpts.deepMaxMegabytes) << 20,
+			MaxRepositories: opts.deepMaxRepos,
+			MaxBytes:        int64(opts.deepMaxMegabytes) << 20,
 		})
 	}
 
@@ -308,14 +296,14 @@ func runCodeScanningStatus(cmd *cobra.Command, _ []string) error {
 	// failing repositories sit in scope.
 	triggered := matchedSeverities(report, failOn)
 
-	applyFilters(report, statusFilter, languageFilter, activityFilter, statusOpts.groupByProperty)
+	applyFilters(report, statusFilter, languageFilter, activityFilter, opts.groupByProperty)
 
-	if err := writeReport(report, format); err != nil {
+	if err := opts.writeReport(cmd, report, format); err != nil {
 		return err
 	}
 
 	if len(triggered) > 0 {
-		fmt.Fprintf(os.Stderr, "\n--fail-on matched: %s\n", strings.Join(triggered, ", "))
+		fmt.Fprintf(cmd.ErrOrStderr(), "\n--fail-on matched: %s\n", strings.Join(triggered, ", "))
 		return &exitCodeError{code: ExitCodeFailOn}
 	}
 
@@ -329,12 +317,12 @@ type exitCodeError struct{ code int }
 func (e *exitCodeError) Error() string { return "" }
 func (e *exitCodeError) ExitCode() int { return e.code }
 
-func buildCache() (*cache.Store, error) {
-	if statusOpts.noCache {
+func (opts *codeScanningOptions) buildCache(warnings io.Writer) (*cache.Store, error) {
+	if opts.noCache {
 		return cache.New(cache.Options{}), nil
 	}
 
-	dir := statusOpts.cacheDir
+	dir := opts.cacheDir
 	if dir == "" {
 		defaultDir, err := cache.DefaultDir()
 		if err != nil {
@@ -345,8 +333,8 @@ func buildCache() (*cache.Store, error) {
 	}
 
 	var maxAge time.Duration
-	if statusOpts.cacheMaxAge != "" {
-		parsed, err := parseDuration(statusOpts.cacheMaxAge)
+	if opts.cacheMaxAge != "" {
+		parsed, err := parseDuration(opts.cacheMaxAge)
 		if err != nil {
 			return nil, fmt.Errorf("invalid --cache-max-age: %w", err)
 		}
@@ -361,7 +349,7 @@ func buildCache() (*cache.Store, error) {
 	// Drop entries older than the configured maximum so the cache directory
 	// does not grow without bound across scheduled runs.
 	if err := store.Prune(); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: cache could not be pruned: %v\n", err)
+		fmt.Fprintf(warnings, "warning: cache could not be pruned: %v\n", err)
 	}
 	return store, nil
 }
@@ -485,24 +473,29 @@ func matchedSeverities(report *model.Report, failOn []model.Severity) []string {
 	return matched
 }
 
-func writeReport(report *model.Report, format output.Format) error {
-	writer := os.Stdout
-	if statusOpts.outputPath != "" {
+func (opts *codeScanningOptions) writeReport(cmd *cobra.Command, report *model.Report, format output.Format) (err error) {
+	writer := cmd.OutOrStdout()
+	if opts.outputPath != "" {
 		// A path that looks like a flag almost always means the intended
 		// value was dropped by the shell, for example `--output $null` in
 		// PowerShell, which would silently create a file named after the next
 		// flag.
-		if strings.HasPrefix(statusOpts.outputPath, "-") {
+		if strings.HasPrefix(opts.outputPath, "-") {
 			return fmt.Errorf(
 				"--output %q looks like a flag rather than a file path; "+
 					"if you meant to discard the output, omit --output or write to a temporary file",
-				statusOpts.outputPath)
+				opts.outputPath)
 		}
-		file, err := os.Create(statusOpts.outputPath)
+		var file *os.File
+		file, err = os.Create(opts.outputPath)
 		if err != nil {
-			return fmt.Errorf("creating %s: %w", statusOpts.outputPath, err)
+			return fmt.Errorf("creating %s: %w", opts.outputPath, err)
 		}
-		defer func() { _ = file.Close() }()
+		defer func() {
+			if closeErr := file.Close(); closeErr != nil {
+				err = errors.Join(err, fmt.Errorf("closing %s: %w", opts.outputPath, closeErr))
+			}
+		}()
 		writer = file
 	}
 
@@ -510,12 +503,12 @@ func writeReport(report *model.Report, format output.Format) error {
 	// large organization can define many properties and the extra columns
 	// make the terminal view unreadable. File formats include them all, where
 	// extra columns cost nothing.
-	tableProperties := statusOpts.properties
-	if statusOpts.groupByProperty != "" && !contains(tableProperties, statusOpts.groupByProperty) {
-		tableProperties = append(append([]string(nil), tableProperties...), statusOpts.groupByProperty)
+	tableProperties := opts.properties
+	if opts.groupByProperty != "" && !contains(tableProperties, opts.groupByProperty) {
+		tableProperties = append(append([]string(nil), tableProperties...), opts.groupByProperty)
 	}
 
-	fileProperties := statusOpts.properties
+	fileProperties := opts.properties
 	if len(fileProperties) == 0 {
 		fileProperties = output.PropertyColumns(report)
 	}
@@ -532,12 +525,12 @@ func writeReport(report *model.Report, format output.Format) error {
 	default:
 		terminal := term.FromEnv()
 		width, _, _ := terminal.Size()
-		isTerminal := terminal.IsTerminalOutput() && statusOpts.outputPath == ""
+		isTerminal := terminal.IsTerminalOutput() && writer == os.Stdout
 		return output.WriteTable(writer, report, output.TableOptions{
 			IsTerminal: isTerminal,
 			Width:      width,
 			Properties: tableProperties,
-			Detailed:   statusOpts.detailed,
+			Detailed:   opts.detailed,
 		})
 	}
 }

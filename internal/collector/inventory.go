@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/advanced-security/gh-ghas-audit/internal/ghapi"
+	"github.com/advanced-security/gh-ghas-audit/v2/internal/ghapi"
 )
 
 // enterpriseOrganizations lists every organization in an enterprise.

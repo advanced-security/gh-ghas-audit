@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/advanced-security/gh-ghas-audit/internal/model"
+	"github.com/advanced-security/gh-ghas-audit/v2/internal/model"
 )
 
 // A repository can run CodeQL from its own workflow rather than default setup.

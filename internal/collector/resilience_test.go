@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/advanced-security/gh-ghas-audit/internal/ghapi"
-	"github.com/advanced-security/gh-ghas-audit/internal/model"
+	"github.com/advanced-security/gh-ghas-audit/v2/internal/ghapi"
+	"github.com/advanced-security/gh-ghas-audit/v2/internal/model"
 )
 
 // A transient rate limit says nothing about a repository. Reporting it as a

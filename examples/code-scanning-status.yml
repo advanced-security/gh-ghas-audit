@@ -1,47 +1,33 @@
-# Example: scheduled organization code scanning status report.
-#
-# This runs the released `gh-ghas-audit` CLI on a schedule and publishes the
-# report as a workflow artifact. The extension is deliberately not packaged as
-# a GitHub Action; it is installed and invoked directly, which keeps a single
-# implementation and a single data contract.
-#
-# Copy this file into `.github/workflows/` in a repository you control.
-
+# Copy into .github/workflows/ after the v2 release.
+# App read permissions: Metadata, Actions, Code scanning alerts,
+# organization Administration and Custom properties.
 name: Code scanning status
 
 on:
   schedule:
-    # Default setup scans weekly, so a daily report catches failures quickly
-    # without adding meaningful API load.
     - cron: "0 6 * * *"
   workflow_dispatch:
     inputs:
       scan_depth:
-        description: "How much evidence to gather"
+        description: Evidence depth
         type: choice
-        default: "health"
-        options: ["config", "health", "diagnostics"]
+        default: health
+        options: [config, health, diagnostics]
+      deep_scope:
+        description: Log selection at diagnostics depth
+        type: choice
+        default: all
+        options: [all, problematic]
 
 permissions:
   contents: read
 
 jobs:
-  status:
+  report:
     runs-on: ubuntu-latest
     timeout-minutes: 60
-
     steps:
-      - name: Generate a GitHub App installation token
-        # An app installation is the recommended credential at organization
-        # scale: it receives a higher primary rate limit than a personal
-        # access token and does not tie the report to one person's account.
-        #
-        # The app needs read-only repository permissions for Metadata,
-        # Actions and Code scanning alerts, plus organization permissions for
-        # Administration (security configurations) and Custom properties.
-        #
-        # The default GITHUB_TOKEN cannot be used, because it is scoped to
-        # this repository alone and cannot inventory the rest of the estate.
+      - name: Generate an organization-scoped token
         id: app-token
         uses: actions/create-github-app-token@v2
         with:
@@ -50,111 +36,83 @@ jobs:
           owner: ${{ github.repository_owner }}
 
       - name: Restore the conditional request cache
-        # Cached ETags let unchanged data return 304 Not Modified, which
-        # GitHub does not count against the primary rate limit. This is the
-        # main reason repeated large scans stay affordable.
         uses: actions/cache@v4
         with:
           path: .ghas-audit-cache
-          key: ghas-audit-status-${{ github.run_id }}
+          key: ghas-audit-v2-${{ github.run_id }}
           restore-keys: |
-            ghas-audit-status-
+            ghas-audit-v2-
 
-      - name: Install the extension
+      - name: Install v2
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-        run: |
-          # Installs the latest release. Append --pin <tag> to hold scheduled
-          # runs on a known version.
-          gh extension install advanced-security/gh-ghas-audit
+        run: gh extension install advanced-security/gh-ghas-audit --pin v2.0.0
 
-      - name: Generate the status report
+      - name: Collect once
+        id: audit
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          DEPTH: ${{ inputs.scan_depth }}
+          ORG: ${{ github.repository_owner }}
+          DEPTH: ${{ inputs.scan_depth || 'health' }}
+          DEEP_SCOPE: ${{ inputs.deep_scope || 'all' }}
+        shell: bash
         run: |
-          set -euo pipefail
           mkdir -p reports
-
           args=(
-            code-scanning status
-            --organization "${{ github.repository_owner }}"
-            --stale-after 8d
-            --skip-archived
-            --skip-forks
-            --concurrency 8
-            --cache-dir .ghas-audit-cache
-            --quiet
+            code-scanning --organization "$ORG"
+            --scan-depth "$DEPTH" --deep-scope "$DEEP_SCOPE"
+            --skip-archived --skip-forks --concurrency 8
+            --cache-dir .ghas-audit-cache --quiet
+            --format json --output reports/status.json
+            --fail-on failing,stalled
           )
-
-          # Use --enterprise instead of --organization to cover every
-          # organization in one run. That needs a token carrying the
-          # read:enterprise scope, which app installation tokens do not
-          # provide, so enterprise scans usually run per organization or with
-          # a scoped personal access token.
-
-          if [ -n "${DEPTH:-}" ]; then
-            args+=(--scan-depth "$DEPTH")
+          # Preserve policy exit 2 so the report is published before failing.
+          set +e
+          gh ghas-audit "${args[@]}"
+          result=$?
+          set -e
+          if [ "$result" -ne 0 ] && [ "$result" -ne 2 ]; then
+            exit "$result"
           fi
+          echo "exit-code=$result" >> "$GITHUB_OUTPUT"
 
-          gh ghas-audit "${args[@]}" --format json          --output reports/status.json
-          gh ghas-audit "${args[@]}" --format csv           --output reports/status.csv
-          gh ghas-audit "${args[@]}" --format language-csv  --output reports/languages.csv
-
-      - name: Summarize the report
+      - name: Summarize
         run: |
           python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
           import json
 
           with open("reports/status.json", encoding="utf-8") as handle:
               report = json.load(handle)
-
           summary = report["summary"]
           print("## Code scanning status\n")
-          print(f"- Repositories: {summary['total_repositories']}")
-          print(f"- Needing attention: {summary['needs_attention']}")
-          print(f"- Stale after: {report['settings']['stale_after']}\n")
-
-          print("| Status | Repositories |")
-          print("| --- | --- |")
+          print(f"Depth: {report['settings']['scan_depth']}")
+          print(f"Repositories: {summary['total_repositories']}")
+          print(f"Needing attention: {summary['needs_attention']}\n")
+          print("| Status | Repositories |\n| --- | --- |")
           for name, count in sorted(summary["by_severity"].items()):
               print(f"| {name} | {count} |")
-
-          actionable = {"failing", "stalled", "stale", "degraded"}
-          problems = [
-              repo for repo in report["repositories"]
-              if repo["status"]["overall"] in actionable
-          ]
-          if problems:
-              print("\n### Repositories needing attention\n")
-              print("| Repository | Status | Reason |")
-              print("| --- | --- | --- |")
-              for repo in problems[:50]:
-                  reason = "; ".join(repo["status"].get("reasons", []))
-                  print(f"| {repo['full_name']} | {repo['status']['overall']} | {reason} |")
-
           if report["stats"]["incomplete"]:
-              print("\n> This report is incomplete. Absence of a problem here "
-                    "does not prove absence of a problem.")
+              print("\n> Incomplete report. Inspect warnings and repository errors.")
           PY
 
       - name: Upload the report
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: code-scanning-status-${{ github.run_id }}
           path: reports/
           retention-days: 90
 
-      - name: Fail when scanning is broken
-        # Runs last so the report is always published, even when this step
-        # fails the workflow. Exit code 2 means the policy matched; any other
-        # non-zero exit code means the tool itself failed.
+      - name: Enforce the collected result
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          COLLECTION_EXIT: ${{ steps.audit.outputs.exit-code }}
         run: |
-          gh ghas-audit code-scanning status \
-            --organization "${{ github.repository_owner }}" \
-            --skip-archived --skip-forks --quiet \
-            --cache-dir .ghas-audit-cache \
-            --format csv --output /dev/null \
-            --fail-on failing,stalled
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+
+          with open("reports/status.json", encoding="utf-8") as handle:
+              report = json.load(handle)
+          sys.exit(1 if report["stats"]["incomplete"] else int(os.environ["COLLECTION_EXIT"]))
+          PY

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/advanced-security/gh-ghas-audit/internal/model"
+	"github.com/advanced-security/gh-ghas-audit/v2/internal/model"
 )
 
 // buildArchive produces a zipped log archive shaped like the one the Actions

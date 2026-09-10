@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/advanced-security/gh-ghas-audit/internal/ghapi"
-	"github.com/advanced-security/gh-ghas-audit/internal/model"
+	"github.com/advanced-security/gh-ghas-audit/v2/internal/ghapi"
+	"github.com/advanced-security/gh-ghas-audit/v2/internal/model"
 )
 
 // codeqlWorkflowPath is the path GitHub assigns to the managed CodeQL workflow
@@ -151,7 +151,7 @@ func (c *Collector) collectRepository(ctx context.Context, org string, source ap
 		// "nothing to scan" from "supported code exists but is not enabled".
 		repo.Status.Execution = model.ExecNotApplicable
 		repo.Status.Freshness = model.FreshNotApplicable
-		repo.Status.Coverage = coverageForUnconfigured(detected)
+		repo.Status.Coverage = coverageForConfigOnly(&repo, detected)
 		repo.Languages = languages.Sorted()
 		finalizeStatus(&repo, false)
 		return repo
@@ -548,15 +548,6 @@ func coverageForConfigOnly(repo *model.Repo, detected []model.Language) model.Co
 		return model.CoverageNoSupportedLanguages
 	}
 	return model.CoverageComplete
-}
-
-// coverageForUnconfigured classifies coverage for a repository that is not
-// running default setup.
-func coverageForUnconfigured(detected []model.Language) model.CoverageStatus {
-	if len(detected) == 0 {
-		return model.CoverageNoSupportedLanguages
-	}
-	return model.CoverageGap
 }
 
 // collectExecution finds the CodeQL workflow at the given path and its most

@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/advanced-security/gh-ghas-audit/internal/model"
+	"github.com/advanced-security/gh-ghas-audit/v2/internal/model"
 )
 
 // A scan in which every organization failed produces no repositories. If the

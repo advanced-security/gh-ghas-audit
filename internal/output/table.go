@@ -9,7 +9,7 @@ import (
 	"github.com/cli/go-gh/v2/pkg/tableprinter"
 	"github.com/fatih/color"
 
-	"github.com/advanced-security/gh-ghas-audit/internal/model"
+	"github.com/advanced-security/gh-ghas-audit/v2/internal/model"
 )
 
 // severityColor maps a severity onto a terminal colour so that problems are

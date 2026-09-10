@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/advanced-security/gh-ghas-audit/internal/ghapi"
-	"github.com/advanced-security/gh-ghas-audit/internal/model"
+	"github.com/advanced-security/gh-ghas-audit/v2/internal/ghapi"
+	"github.com/advanced-security/gh-ghas-audit/v2/internal/model"
 )
 
 // fakeClient serves canned responses so collection and classification can be

@@ -11,7 +11,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/advanced-security/gh-ghas-audit/internal/model"
+	"github.com/advanced-security/gh-ghas-audit/v2/internal/model"
 )
 
 // Format identifies an output representation.

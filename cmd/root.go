@@ -10,27 +10,12 @@ import (
 	"github.com/spf13/pflag"
 )
 
-// Holds flags for organizations and repository.
-var (
-	Organizations         string
-	Repository            string
-	SecurityConfiguration string // Security configuration name to filter repos
-	CSVOutput             string // File path for CSV output
-	SkipArchived          bool   // Skip archived repositories
-	SkipForks             bool   // Skip forked repositories
-)
-
-// rootCmd is the base command called without any subcommands.
-var rootCmd = &cobra.Command{
-	Use:   "gh-ghas-audit",
-	Short: "Audit your GHAS deployment",
-	Long:  `Audit your GHAS deployment`,
-	// Errors are printed by Execute so that a requested exit code can be
-	// returned without an empty "Error:" line.
-	SilenceErrors: true,
-	Run: func(cmd *cobra.Command, args []string) {
-		_ = cmd.Help()
-	},
+type scopeOptions struct {
+	organizations         string
+	repository            string
+	securityConfiguration string
+	skipArchived          bool
+	skipForks             bool
 }
 
 // buildVersion is overridden at release time via -ldflags.
@@ -42,18 +27,10 @@ func version() string {
 	if buildVersion != "" {
 		return buildVersion
 	}
-	if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" {
+	if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" && info.Main.Version != "(devel)" {
 		return info.Main.Version
 	}
-	return "dev"
-}
-
-var versionCmd = &cobra.Command{
-	Use:   "version",
-	Short: "Print the extension version",
-	Run: func(cmd *cobra.Command, _ []string) {
-		fmt.Fprintln(cmd.OutOrStdout(), version())
-	},
+	return "2.0.0-dev"
 }
 
 // normalizeFlagNames accepts --organization as an alias for --organizations,
@@ -65,58 +42,68 @@ func normalizeFlagNames(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 	return pflag.NormalizedName(name)
 }
 
-func init() {
-	// Applies to this command and every subcommand, so --organization works
-	// wherever --organizations is accepted.
+func newRootCommand() *cobra.Command {
+	scope := &scopeOptions{}
+	rootCmd := &cobra.Command{
+		Use:           "gh-ghas-audit",
+		Short:         "Audit your GHAS deployment",
+		Version:       version(),
+		SilenceErrors: true,
+		Args:          cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return cmd.Help()
+		},
+	}
 	rootCmd.SetGlobalNormalizationFunc(normalizeFlagNames)
 
 	rootCmd.PersistentFlags().StringVarP(
-		&Organizations,
+		&scope.organizations,
 		"organizations",
 		"o",
 		"",
 		"Comma separated list of organizations to audit",
 	)
 	rootCmd.PersistentFlags().StringVarP(
-		&Repository,
+		&scope.repository,
 		"repository",
 		"r",
 		"",
 		"Single repository to audit",
 	)
 	rootCmd.PersistentFlags().StringVar(
-		&CSVOutput,
-		"csv-output",
-		"",
-		"File path to output CSV report",
-	)
-	rootCmd.PersistentFlags().StringVar(
-		&SecurityConfiguration,
+		&scope.securityConfiguration,
 		"security-configuration",
 		"",
 		"Filter repositories by security configuration name",
 	)
 	rootCmd.PersistentFlags().BoolVar(
-		&SkipArchived,
+		&scope.skipArchived,
 		"skip-archived",
 		false,
 		"Skip archived repositories",
 	)
 	rootCmd.PersistentFlags().BoolVar(
-		&SkipForks,
+		&scope.skipForks,
 		"skip-forks",
 		false,
 		"Skip forked repositories",
 	)
 
-	// Attach code-scanning subcommand.
-	rootCmd.AddCommand(codeScanningAuditCmd)
-	rootCmd.AddCommand(versionCmd)
+	rootCmd.AddCommand(newCodeScanningCommand(scope))
+	rootCmd.AddCommand(&cobra.Command{
+		Use:   "version",
+		Short: "Print the extension version",
+		Args:  cobra.NoArgs,
+		Run: func(cmd *cobra.Command, _ []string) {
+			fmt.Fprintln(cmd.OutOrStdout(), version())
+		},
+	})
+	return rootCmd
 }
 
 // Execute runs the main CLI command.
 func Execute() {
-	if err := rootCmd.Execute(); err != nil {
+	if err := newRootCommand().Execute(); err != nil {
 		// A requested exit code carries no message of its own.
 		var coded *exitCodeError
 		if errors.As(err, &coded) {

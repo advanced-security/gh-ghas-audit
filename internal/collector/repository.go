@@ -602,7 +602,9 @@ func (c *Collector) collectExecution(
 	// which is exactly the case where proving "it has scanned before" matters.
 	if latestSuccessful == nil {
 		successRuns, err := c.fetchRuns(ctx, org, name, workflowID, branch, "success", 1)
-		if err == nil && len(successRuns) > 0 {
+		if err != nil {
+			repo.Errors = append(repo.Errors, fmt.Sprintf("successful workflow runs: %v", err))
+		} else if len(successRuns) > 0 {
 			latestSuccessful = &successRuns[0]
 		}
 	}
@@ -736,17 +738,18 @@ func executionStatus(latest, latestCompleted *workflowRun) model.ExecutionStatus
 	if latest == nil {
 		return model.ExecNoCompletedRun
 	}
+	active := activeExecutionStatus(latest.Status)
 	if latestCompleted == nil {
-		if isRunning(latest.Status) {
-			return model.ExecInProgress
+		if active != "" {
+			return active
 		}
 		return model.ExecNoCompletedRun
 	}
 
 	switch strings.ToLower(latestCompleted.Conclusion) {
 	case "success":
-		if latest != latestCompleted && isRunning(latest.Status) {
-			return model.ExecInProgress
+		if latest != latestCompleted && active != "" {
+			return active
 		}
 		return model.ExecSuccess
 	case "failure":
@@ -766,12 +769,14 @@ func executionStatus(latest, latestCompleted *workflowRun) model.ExecutionStatus
 	}
 }
 
-func isRunning(status string) bool {
+func activeExecutionStatus(status string) model.ExecutionStatus {
 	switch strings.ToLower(status) {
-	case "in_progress", "queued", "waiting", "requested", "pending":
-		return true
+	case "in_progress":
+		return model.ExecInProgress
+	case "queued", "waiting", "requested", "pending":
+		return model.ExecQueued
 	default:
-		return false
+		return ""
 	}
 }
 
@@ -920,6 +925,9 @@ func (c *Collector) freshness(repo *model.Repo) model.FreshnessStatus {
 
 	newest := newestSuccessfulEvidence(repo)
 	if newest == nil {
+		if len(repo.Errors) > 0 {
+			return model.FreshUnknown
+		}
 		return model.FreshNever
 	}
 
@@ -934,13 +942,14 @@ func (c *Collector) freshness(repo *model.Repo) model.FreshnessStatus {
 	return model.FreshCurrent
 }
 
-// classifyActivity records how long ago the repository was last pushed to and
-// whether that makes it inactive.
-//
-// The repository push timestamp is the closest public signal to GitHub's own
-// "no pushes or pull requests" rule. Opening a pull request requires pushing a
-// branch, so the two agree in practice, but this remains an approximation.
+// classifyActivity records push age separately from combined push/PR activity.
 func (c *Collector) classifyActivity(repo *model.Repo) {
+	now := c.now()
+	repo.DaysSincePush = nil
+	if repo.PushedAt != nil {
+		days := int(now.Sub(*repo.PushedAt).Hours() / 24)
+		repo.DaysSincePush = &days
+	}
 	if c.options.InactiveAfter <= 0 {
 		repo.Activity = model.ActivityActive
 		return
@@ -958,9 +967,7 @@ func (c *Collector) classifyActivity(repo *model.Repo) {
 		return
 	}
 
-	since := c.now().Sub(*activity)
-	days := int(since.Hours() / 24)
-	repo.DaysSincePush = &days
+	since := now.Sub(*activity)
 
 	if since >= c.options.InactiveAfter {
 		repo.Activity = model.ActivityInactive

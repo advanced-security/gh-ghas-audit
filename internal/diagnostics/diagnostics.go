@@ -398,11 +398,17 @@ func Scan(archive []byte, runURL string, maxExcerpt int) ([]model.Diagnostic, er
 
 		opened, err := file.Open()
 		if err != nil {
-			continue
+			return diagnostics, fmt.Errorf("opening log %q: %w", file.Name, err)
 		}
-		found := scanStream(opened, language, runURL, maxExcerpt, seen, len(diagnostics))
-		_ = opened.Close()
+		found, scanErr := scanStream(opened, language, runURL, maxExcerpt, seen, len(diagnostics))
+		closeErr := opened.Close()
 		diagnostics = append(diagnostics, found...)
+		if scanErr != nil {
+			return diagnostics, fmt.Errorf("reading log %q: %w", file.Name, scanErr)
+		}
+		if closeErr != nil {
+			return diagnostics, fmt.Errorf("closing log %q: %w", file.Name, closeErr)
+		}
 	}
 
 	return diagnostics, nil
@@ -415,7 +421,7 @@ func scanStream(
 	maxExcerpt int,
 	seen map[string]bool,
 	already int,
-) []model.Diagnostic {
+) ([]model.Diagnostic, error) {
 	var diagnostics []model.Diagnostic
 
 	scanner := bufio.NewScanner(reader)
@@ -508,7 +514,7 @@ func scanStream(
 	}
 	closeGroup()
 
-	return diagnostics
+	return diagnostics, scanner.Err()
 }
 
 // classifyGroup assigns a code and severity to a CodeQL diagnostic title.

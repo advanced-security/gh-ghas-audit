@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -198,6 +199,16 @@ func (opts *codeScanningOptions) run(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+	visibilityFilter, err := parseVisibilities(opts.visibilityFilter)
+	if err != nil {
+		return err
+	}
+	if err := validateGlobs(opts.nameFilter, "--match"); err != nil {
+		return err
+	}
+	if err := validateGlobs(opts.excludeFilter, "--exclude"); err != nil {
+		return err
+	}
 	propertyFilters, err := parsePropertyFilters(opts.propertyFilters)
 	if err != nil {
 		return err
@@ -264,7 +275,7 @@ func (opts *codeScanningOptions) run(cmd *cobra.Command, _ []string) error {
 		Properties:            opts.properties,
 		GroupByProperty:       opts.groupByProperty,
 		PropertyFilters:       propertyFilters,
-		VisibilityFilter:      lowerAll(opts.visibilityFilter),
+		VisibilityFilter:      visibilityFilter,
 		NameFilter:            opts.nameFilter,
 		ExcludeFilter:         opts.excludeFilter,
 		Depth:                 depth,
@@ -595,6 +606,27 @@ func severityNames() string {
 		names = append(names, string(severity))
 	}
 	return strings.Join(names, ", ")
+}
+
+func parseVisibilities(values []string) ([]string, error) {
+	values = lowerAll(splitList(strings.Join(values, ",")))
+	for _, value := range values {
+		switch value {
+		case "public", "private", "internal":
+		default:
+			return nil, fmt.Errorf("invalid --visibility value %q; expected public, private or internal", value)
+		}
+	}
+	return values, nil
+}
+
+func validateGlobs(patterns []string, flagName string) error {
+	for _, pattern := range patterns {
+		if _, err := path.Match(strings.ToLower(strings.TrimSpace(pattern)), ""); err != nil {
+			return fmt.Errorf("invalid %s pattern %q: %w", flagName, pattern, err)
+		}
+	}
+	return nil
 }
 
 func parseLanguages(values []string) ([]model.Language, error) {

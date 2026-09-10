@@ -382,6 +382,16 @@ func matchedSeverities(report *model.Report, failOn []model.Severity) []string {
 func writeReport(report *model.Report, format output.Format) error {
 	writer := os.Stdout
 	if statusOpts.outputPath != "" {
+		// A path that looks like a flag almost always means the intended
+		// value was dropped by the shell, for example `--output $null` in
+		// PowerShell, which would silently create a file named after the next
+		// flag.
+		if strings.HasPrefix(statusOpts.outputPath, "-") {
+			return fmt.Errorf(
+				"--output %q looks like a flag rather than a file path; "+
+					"if you meant to discard the output, omit --output or write to a temporary file",
+				statusOpts.outputPath)
+		}
 		file, err := os.Create(statusOpts.outputPath)
 		if err != nil {
 			return fmt.Errorf("creating %s: %w", statusOpts.outputPath, err)

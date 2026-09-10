@@ -513,7 +513,28 @@ func (c *Collector) skipRepository(source apiRepository, properties map[string]s
 		return true
 	}
 	for name, wanted := range c.options.PropertyFilters {
-		if !matchesAny(strings.ToLower(properties[name]), wanted) {
+		value, _ := model.PropertyValue(properties, name)
+		if !propertyMatches(value, wanted) {
+			return true
+		}
+	}
+	return false
+}
+
+// propertyMatches reports whether a custom property value satisfies a filter.
+//
+// Multi-select properties arrive as a joined list, so each element is matched
+// individually. Filtering on Project=WUPH must select a repository whose
+// Project is "WUPH, Internal".
+func propertyMatches(value string, patterns []string) bool {
+	if matchesAny(value, patterns) {
+		return true
+	}
+	if !strings.Contains(value, ",") {
+		return false
+	}
+	for _, element := range strings.Split(value, ",") {
+		if matchesAny(strings.TrimSpace(element), patterns) {
 			return true
 		}
 	}
@@ -550,10 +571,14 @@ func (c *Collector) filterProperties(properties map[string]string) map[string]st
 		return copied
 	}
 
+	// Match requested names case-insensitively, but store the organization's
+	// own spelling so output shows the real property name.
 	filtered := map[string]string{}
 	for _, name := range wanted {
-		if value, ok := properties[name]; ok {
-			filtered[name] = value
+		for key, value := range properties {
+			if strings.EqualFold(key, name) {
+				filtered[key] = value
+			}
 		}
 	}
 	if len(filtered) == 0 {
@@ -563,8 +588,10 @@ func (c *Collector) filterProperties(properties map[string]string) map[string]st
 }
 
 // matchesAny performs case-insensitive glob matching, supporting the "team-*"
-// naming conventions commonly used to select repositories.
+// naming conventions commonly used to select repositories. Both the value and
+// the patterns are normalized here so callers cannot get the casing wrong.
 func matchesAny(value string, patterns []string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
 	for _, pattern := range patterns {
 		pattern = strings.ToLower(strings.TrimSpace(pattern))
 		if pattern == "" {

@@ -80,7 +80,8 @@ func WriteTable(writer io.Writer, report *model.Report, opts TableOptions) error
 		printer.AddField(lastScanCell(repo), tableprinter.WithTruncate(nil))
 		printer.AddField(languageCell(repo), tableprinter.WithTruncate(nil))
 		for _, property := range opts.Properties {
-			printer.AddField(repo.Properties[property], tableprinter.WithTruncate(nil))
+			value, _ := model.PropertyValue(repo.Properties, property)
+			printer.AddField(value, tableprinter.WithTruncate(nil))
 		}
 		if opts.Detailed {
 			printer.AddField(detailCell(repo), tableprinter.WithTruncate(nil))

@@ -2,6 +2,7 @@ package model
 
 import (
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -219,6 +220,37 @@ func NeedsAttention(severity Severity) bool {
 	}
 }
 
+// PropertyValue looks up a custom property value case-insensitively.
+//
+// Custom property names are defined by each organization in arbitrary case
+// ("Project", "PROJECT", "project"), and nobody remembers which. Requiring an
+// exact match would silently report every repository as having no value.
+func PropertyValue(properties map[string]string, name string) (string, bool) {
+	if len(properties) == 0 || name == "" {
+		return "", false
+	}
+	if value, ok := properties[name]; ok {
+		return value, true
+	}
+	for key, value := range properties {
+		if strings.EqualFold(key, name) {
+			return value, true
+		}
+	}
+	return "", false
+}
+
+// PropertyKey returns the organization's own spelling of a property name, so
+// output uses the real casing rather than whatever the user typed.
+func PropertyKey(properties map[string]string, name string) string {
+	for key := range properties {
+		if strings.EqualFold(key, name) {
+			return key
+		}
+	}
+	return name
+}
+
 // BuildSummary computes all aggregate counts for a set of repositories.
 func BuildSummary(repos []Repo, groupProperty string) Summary {
 	summary := Summary{
@@ -228,6 +260,16 @@ func BuildSummary(repos []Repo, groupProperty string) Summary {
 		ByExecution:       map[string]int{},
 		ByFreshness:       map[string]int{},
 		ByCoverage:        map[string]int{},
+	}
+
+	// Resolve the property to the organization's own casing once, so group
+	// labels match what an administrator sees in the settings UI.
+	groupLabel := groupProperty
+	for _, repo := range repos {
+		if resolved := PropertyKey(repo.Properties, groupProperty); resolved != groupProperty {
+			groupLabel = resolved
+			break
+		}
 	}
 
 	groups := map[string]*GroupSummary{}
@@ -244,13 +286,13 @@ func BuildSummary(repos []Repo, groupProperty string) Summary {
 		if groupProperty == "" {
 			continue
 		}
-		value := repo.Properties[groupProperty]
+		value, _ := PropertyValue(repo.Properties, groupProperty)
 		if value == "" {
 			value = "(not set)"
 		}
 		group, ok := groups[value]
 		if !ok {
-			group = &GroupSummary{Property: groupProperty, Value: value, BySeverity: map[string]int{}}
+			group = &GroupSummary{Property: groupLabel, Value: value, BySeverity: map[string]int{}}
 			groups[value] = group
 		}
 		group.Repositories++

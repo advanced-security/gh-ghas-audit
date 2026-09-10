@@ -141,7 +141,8 @@ func WriteCSV(writer io.Writer, report *model.Report, propertyColumns []string) 
 	for _, repo := range report.Repositories {
 		row := repositoryRow(repo)
 		for _, property := range propertyColumns {
-			row = append(row, repo.Properties[property])
+			value, _ := model.PropertyValue(repo.Properties, property)
+			row = append(row, value)
 		}
 		if err := csvWriter.Write(row); err != nil {
 			return err
@@ -246,7 +247,8 @@ func WriteLanguageCSV(writer io.Writer, report *model.Report, propertyColumns []
 				state.JobURL,
 			}
 			for _, property := range propertyColumns {
-				row = append(row, repo.Properties[property])
+				value, _ := model.PropertyValue(repo.Properties, property)
+				row = append(row, value)
 			}
 			if err := csvWriter.Write(row); err != nil {
 				return err

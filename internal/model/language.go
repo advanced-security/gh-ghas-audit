@@ -116,6 +116,11 @@ type LanguageState struct {
 	Analyzed bool `json:"analyzed"`
 	// Succeeded means the analysis job for the language completed successfully.
 	Succeeded bool `json:"succeeded"`
+	// Deselected means the language was analyzed in the latest run but is no
+	// longer part of the configuration. GitHub clears a language from default
+	// setup when its analysis fails, so the language will not run again until
+	// someone re-enables it.
+	Deselected bool `json:"deselected,omitempty"`
 	// JobConclusion is the raw Actions conclusion for the language job.
 	JobConclusion string `json:"job_conclusion,omitempty"`
 	// JobURL links directly to the per-language job for evidence.

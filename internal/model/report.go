@@ -149,6 +149,10 @@ type Repo struct {
 	UnsupportedLanguages []string `json:"unsupported_languages,omitempty"`
 	// FailedLanguages lists configured languages without successful evidence.
 	FailedLanguages []Language `json:"failed_languages,omitempty"`
+	// DeselectedLanguages lists languages that were analyzed in the latest run
+	// but have since been removed from the configuration, which happens when
+	// their analysis fails. They will not be scanned again.
+	DeselectedLanguages []Language `json:"deselected_languages,omitempty"`
 
 	// LastSuccessfulScan is the newest successful analysis evidence, used for
 	// "when did this repository last actually scan" questions.

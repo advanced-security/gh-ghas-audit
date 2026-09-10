@@ -540,25 +540,49 @@ func (c *Collector) collectLanguageEvidence(
 }
 
 // finalizeLanguages materializes the per-language slices used by the report.
+//
+// The primary signal needs no run history at all: a supported language present
+// in the repository but absent from the configured languages is not being
+// scanned. Job evidence only adds context about why.
 func finalizeLanguages(repo *model.Repo, languages model.LanguageSet) {
 	repo.Languages = languages.Sorted()
 
-	var succeeded, failed, missing []model.Language
-	for _, state := range repo.Languages {
+	var succeeded, failed, missing, deselected []model.Language
+	for index := range repo.Languages {
+		state := &repo.Languages[index]
+
 		switch {
 		case state.Configured && state.Succeeded:
 			succeeded = append(succeeded, state.Language)
 		case state.Configured:
 			failed = append(failed, state.Language)
 		}
-		if state.Detected && !state.Configured && model.IsDetectable(state.Language) {
+
+		if state.Configured {
+			continue
+		}
+
+		// Detected in the repository but not configured: the language is not
+		// being scanned. This comparison alone catches the problem, without
+		// needing Actions history.
+		if state.Detected && model.IsDetectable(state.Language) {
 			missing = append(missing, state.Language)
+		}
+
+		// If it also ran in the latest analysis, it was configured until
+		// recently. GitHub clears a language from default setup when its
+		// analysis fails, so this distinguishes "never enabled" from "enabled,
+		// failed, and silently dropped".
+		if state.Analyzed {
+			state.Deselected = true
+			deselected = append(deselected, state.Language)
 		}
 	}
 
 	repo.SucceededLanguages = succeeded
 	repo.FailedLanguages = failed
 	repo.MissingLanguages = missing
+	repo.DeselectedLanguages = deselected
 }
 
 // freshness determines whether successful scan evidence is recent enough,
@@ -652,6 +676,12 @@ func newestSuccessfulEvidence(repo *model.Repo) *time.Time {
 
 // coverageStatus compares what should be analyzed against what actually was.
 func coverageStatus(repo *model.Repo, detected []model.Language) model.CoverageStatus {
+	// A language that was dropped from the configuration after failing is the
+	// most serious coverage problem, because nothing will scan it again and
+	// nothing else in the product surfaces it.
+	if len(repo.DeselectedLanguages) > 0 {
+		return model.CoveragePartial
+	}
 	if len(repo.ConfiguredLanguages) == 0 && len(detected) == 0 {
 		return model.CoverageNoSupportedLanguages
 	}
@@ -677,8 +707,24 @@ func apiDiagnostics(repo *model.Repo) []model.Diagnostic {
 		runURL = repo.Execution.LatestCompletedRun.URL
 	}
 
-	// The highest-value finding: the workflow reported success while a
-	// configured language produced no successful analysis.
+	// The highest-value finding: a language ran, failed, and has been removed
+	// from the configuration, so nothing will scan it again. No other view
+	// surfaces this.
+	for _, language := range repo.DeselectedLanguages {
+		diagnostics = append(diagnostics, model.Diagnostic{
+			Source:   model.SourceAPI,
+			Severity: "error",
+			Code:     "language-auto-deselected",
+			Language: language,
+			Message: fmt.Sprintf(
+				"%s was analyzed in the latest run but is no longer selected in default setup; "+
+					"it will not be scanned again until it is re-enabled", language),
+			URL: repo.URL + "/settings/code-scanning/default-setup",
+		})
+	}
+
+	// The workflow reported success while a configured language produced no
+	// successful analysis.
 	if repo.Status.Execution == model.ExecSuccess {
 		for _, language := range repo.FailedLanguages {
 			diagnostics = append(diagnostics, model.Diagnostic{
@@ -694,6 +740,11 @@ func apiDiagnostics(repo *model.Repo) []model.Diagnostic {
 	}
 
 	for _, language := range repo.MissingLanguages {
+		// A language that was dropped after failing is reported separately
+		// above, with the stronger message.
+		if containsLanguage(repo.DeselectedLanguages, language) {
+			continue
+		}
 		diagnostics = append(diagnostics, model.Diagnostic{
 			Source:   model.SourceAPI,
 			Severity: "warning",
@@ -701,7 +752,7 @@ func apiDiagnostics(repo *model.Repo) []model.Diagnostic {
 			Language: language,
 			Message: fmt.Sprintf(
 				"%s was detected in this repository but is not configured for analysis", language),
-			URL: repo.URL + "/settings/security_analysis",
+			URL: repo.URL + "/settings/code-scanning/default-setup",
 		})
 	}
 
@@ -729,6 +780,16 @@ func apiDiagnostics(repo *model.Repo) []model.Diagnostic {
 func hasWarningDiagnostic(diagnostics []model.Diagnostic) bool {
 	for _, diagnostic := range diagnostics {
 		if diagnostic.Severity == "warning" || diagnostic.Severity == "error" {
+			return true
+		}
+	}
+	return false
+}
+
+// containsLanguage reports whether a language appears in a list.
+func containsLanguage(languages []model.Language, wanted model.Language) bool {
+	for _, language := range languages {
+		if language == wanted {
 			return true
 		}
 	}

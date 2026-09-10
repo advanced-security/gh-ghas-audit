@@ -243,16 +243,37 @@ func languageCell(repo model.Repo) string {
 	summary := fmt.Sprintf("%d/%d", succeeded, configured)
 
 	var notes []string
+	if len(repo.DeselectedLanguages) > 0 {
+		notes = append(notes, "dropped after failing: "+model.JoinLanguages(repo.DeselectedLanguages))
+	}
 	if len(repo.FailedLanguages) > 0 {
 		notes = append(notes, "not analyzed: "+model.JoinLanguages(repo.FailedLanguages))
 	}
 	if len(repo.MissingLanguages) > 0 {
-		notes = append(notes, "not configured: "+model.JoinLanguages(repo.MissingLanguages))
+		remaining := make([]model.Language, 0, len(repo.MissingLanguages))
+		for _, language := range repo.MissingLanguages {
+			if !containsLanguage(repo.DeselectedLanguages, language) {
+				remaining = append(remaining, language)
+			}
+		}
+		if len(remaining) > 0 {
+			notes = append(notes, "not configured: "+model.JoinLanguages(remaining))
+		}
 	}
 	if len(notes) == 0 {
 		return summary
 	}
 	return summary + " (" + strings.Join(notes, "; ") + ")"
+}
+
+// containsLanguage reports whether a language appears in a list.
+func containsLanguage(languages []model.Language, wanted model.Language) bool {
+	for _, language := range languages {
+		if language == wanted {
+			return true
+		}
+	}
+	return false
 }
 
 func detailCell(repo model.Repo) string {

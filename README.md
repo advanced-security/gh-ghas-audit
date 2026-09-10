@@ -114,7 +114,7 @@ reported across four independent dimensions.
 
 | Dimension | Values | Question it answers |
 | --- | --- | --- |
-| `configuration` | `configured`, `not-configured`, `attaching`, `updating`, `attach-failed`, `unavailable` | Is code scanning set up, and did the security configuration attach? |
+| `configuration` | `configured`, `not-configured`, `advanced-setup`, `attaching`, `updating`, `attach-failed`, `unavailable` | Is code scanning set up, and did the security configuration attach? |
 | `execution` | `success`, `failure`, `timed-out`, `cancelled`, `action-required`, `startup-failure`, `in-progress`, `queued`, `no-workflow`, `no-completed-run` | Did the most recent analysis run succeed, fail, or never run? |
 | `freshness` | `current`, `stale`, `never-scanned` | How long ago did this repository last scan successfully, against the threshold for its scan schedule? |
 | `coverage` | `complete`, `partial`, `gap`, `no-supported-languages` | Are all supported languages actually being analyzed? |
@@ -489,9 +489,11 @@ plainly so the report is not mistaken for something it cannot be.
   default setup with no successful analysis is reported as not analyzed.
 - **`actions` cannot be detected from source.** It is never reported as an
   unconfigured coverage gap, because there is no reliable way to verify it.
-- **Advanced setup and third-party SARIF are not evaluated yet.** Only default
-  setup scan health is reported. Repositories using an advanced setup workflow
-  are reported by their configuration state rather than their scan health.
+- **Advanced setup is recognized but not evaluated.** A repository running
+  CodeQL from its own workflow reports `advanced-setup` with an `unknown`
+  status and the date of its last analysis, rather than being miscounted as a
+  rollout gap. Its scan health is not assessed yet. Third-party SARIF uploads
+  are not evaluated either.
 - **Enterprise scans need an enterprise-scoped token.** See
   [Permissions](#permissions).
 - **There is no push notification.** GitHub has no code scanning specific

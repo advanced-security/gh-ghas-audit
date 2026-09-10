@@ -89,9 +89,20 @@ func (c *Collector) collectRepository(ctx context.Context, org string, source ap
 	}
 
 	if repo.Status.Configuration != model.ConfigConfigured && repo.Status.Configuration != model.ConfigAttachFailed {
-		// Nothing is scanning here, so run and language evidence is not
-		// applicable. Coverage still distinguishes "nothing to scan" from
-		// "supported code exists but is not enabled".
+		// Default setup is off, but CodeQL may still be running from a
+		// workflow the repository controls. Checking for existing analyses
+		// avoids reporting a repository that scans perfectly well as a
+		// rollout gap, which would be the most common false positive in an
+		// estate that mixes default and advanced setup.
+		if repo.Status.Configuration == model.ConfigNotConfigured {
+			if latest, found := c.latestCodeQLAnalysis(ctx, org, source.Name, repo.DefaultBranch); found {
+				repo.Status.Configuration = model.ConfigAdvancedSetup
+				repo.LastSuccessfulScan = latest
+			}
+		}
+
+		// Nothing further is evaluated here. Coverage still distinguishes
+		// "nothing to scan" from "supported code exists but is not enabled".
 		repo.Status.Execution = model.ExecNotApplicable
 		repo.Status.Freshness = model.FreshNotApplicable
 		repo.Status.Coverage = coverageForUnconfigured(detected)
@@ -246,6 +257,34 @@ func resolveConfigurationStatus(setup *defaultSetup, setupErr error, attachment 
 	return model.ConfigNotConfigured
 }
 
+// latestCodeQLAnalysis reports whether CodeQL has produced any analysis on the
+// default branch, and when. It is used to recognize repositories that scan
+// through an advanced setup workflow rather than default setup.
+func (c *Collector) latestCodeQLAnalysis(ctx context.Context, org, name, branch string) (*time.Time, bool) {
+	query := url.Values{}
+	query.Set("tool_name", "CodeQL")
+	query.Set("per_page", "1")
+	if branch != "" {
+		query.Set("ref", "refs/heads/"+branch)
+	}
+
+	path := fmt.Sprintf("repos/%s/%s/code-scanning/analyses?%s",
+		url.PathEscape(org), url.PathEscape(name), query.Encode())
+
+	var analyses []codeScanningAnalysis
+	if err := c.client.GetJSON(ctx, path, &analyses); err != nil {
+		// A repository without code scanning returns 404 here, which simply
+		// means there is no advanced setup to recognize.
+		return nil, false
+	}
+	if len(analyses) == 0 {
+		return nil, false
+	}
+	return analyses[0].CreatedAt, true
+}
+
+// coverageForUnconfigured classifies coverage for a repository that is not
+// running default setup.
 func coverageForUnconfigured(detected []model.Language) model.CoverageStatus {
 	if len(detected) == 0 {
 		return model.CoverageNoSupportedLanguages

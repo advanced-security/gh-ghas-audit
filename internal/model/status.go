@@ -16,6 +16,10 @@ const (
 	ConfigConfigured ConfigurationStatus = "configured"
 	// ConfigNotConfigured means default setup is available but switched off.
 	ConfigNotConfigured ConfigurationStatus = "not-configured"
+	// ConfigAdvancedSetup means default setup is off but CodeQL is running
+	// from a workflow the repository controls. Scanning is happening; this
+	// tool does not yet evaluate its health.
+	ConfigAdvancedSetup ConfigurationStatus = "advanced-setup"
 	// ConfigAttaching means a security configuration is still being applied.
 	ConfigAttaching ConfigurationStatus = "attaching"
 	// ConfigUpdating means a security configuration is being updated.
@@ -281,6 +285,13 @@ func classify(status *Status, hasWarning bool) (Severity, []string) {
 	switch status.Configuration {
 	case ConfigUnavailable:
 		return SeverityUnavailable, []string{"code scanning configuration could not be read for this repository"}
+	case ConfigAdvancedSetup:
+		// CodeQL is running from a repository-controlled workflow. Reporting
+		// this as a rollout gap would be wrong, and reporting it as healthy
+		// would claim an assessment that was never made.
+		return SeverityUnknown, []string{
+			"code scanning runs from an advanced setup workflow, whose health this tool does not evaluate yet",
+		}
 	case ConfigNotConfigured:
 		// A repository with no analyzable code is not a rollout gap.
 		if status.Coverage == CoverageNoSupportedLanguages {

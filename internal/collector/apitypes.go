@@ -120,6 +120,21 @@ type codeqlDatabase struct {
 	UpdatedAt *time.Time `json:"updated_at"`
 }
 
+// codeScanningAnalysis mirrors an entry from the code scanning analyses
+// endpoint. The error field names the language that failed without needing to
+// read Actions logs.
+type codeScanningAnalysis struct {
+	Category   string     `json:"category"`
+	Error      string     `json:"error"`
+	CreatedAt  *time.Time `json:"created_at"`
+	Results    int        `json:"results_count"`
+	Rules      int        `json:"rules_count"`
+	CommitSHA  string     `json:"commit_sha"`
+	Ref        string     `json:"ref"`
+	Deletable  bool       `json:"deletable"`
+	AnalysisID int64      `json:"id"`
+}
+
 // securityConfiguration mirrors an org or enterprise code security
 // configuration.
 type securityConfiguration struct {

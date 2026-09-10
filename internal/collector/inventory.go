@@ -67,9 +67,15 @@ func (c *Collector) enterpriseOrganizations(ctx context.Context, slug string) ([
 		}
 
 		if response.Enterprise == nil {
+			// A token without read:enterprise gets a null enterprise rather
+			// than a scope error, so the missing scope is the most likely
+			// cause and is worth naming first.
 			return nil, fmt.Errorf(
-				"enterprise %q was not found or is not visible to this token; "+
-					"check the slug, or pass --organization explicitly", slug)
+				"enterprise %q is not visible to this token. This is most often a missing scope: "+
+					"run `gh auth refresh -h %s -s read:enterprise`. If a GH_TOKEN environment variable is set, "+
+					"it overrides your stored credentials and may lack that scope. "+
+					"Otherwise check the slug from your enterprise URL, or pass --organization explicitly",
+				slug, c.client.Host())
 		}
 
 		for _, node := range response.Enterprise.Organizations.Nodes {

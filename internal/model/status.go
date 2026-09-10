@@ -228,6 +228,12 @@ type Status struct {
 	Execution     ExecutionStatus     `json:"execution"`
 	Freshness     FreshnessStatus     `json:"freshness"`
 	Coverage      CoverageStatus      `json:"coverage"`
+	// Activity records the scan schedule the repository is on, which decides
+	// the staleness threshold applied to it.
+	Activity Activity `json:"activity,omitempty"`
+	// StaleAfter is the threshold that was applied, so a stale verdict can be
+	// explained without re-deriving it.
+	StaleAfter string `json:"stale_after,omitempty"`
 	// Incomplete records that some evidence could not be collected for this
 	// repository. A repository with incomplete evidence is never reported as
 	// healthy, because absence of a detected problem would not mean absence of
@@ -252,6 +258,21 @@ func Classify(status *Status, hasWarning bool) {
 			"some evidence could not be collected, so this repository cannot be confirmed healthy",
 		}
 	}
+}
+
+// staleReason explains a stale verdict in terms of the schedule the repository
+// is actually on, so a monthly-scanned repository is not mistaken for one that
+// missed a weekly scan.
+func staleReason(status *Status) string {
+	threshold := status.StaleAfter
+	if threshold == "" {
+		threshold = "the configured threshold"
+	}
+	if status.Activity == ActivityInactive {
+		return "no successful analysis within " + threshold +
+			"; this repository has had no recent pushes, so GitHub scans it monthly at most"
+	}
+	return "no successful analysis within " + threshold
 }
 
 func classify(status *Status, hasWarning bool) (Severity, []string) {
@@ -305,7 +326,7 @@ func classify(status *Status, hasWarning bool) (Severity, []string) {
 	}
 
 	if status.Freshness == FreshStale {
-		reasons = append(reasons, "most recent successful analysis is older than the staleness threshold")
+		reasons = append(reasons, staleReason(status))
 		return SeverityStale, reasons
 	}
 

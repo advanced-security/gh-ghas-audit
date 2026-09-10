@@ -110,7 +110,7 @@ reported across four independent dimensions.
 | --- | --- | --- |
 | `configuration` | `configured`, `not-configured`, `attaching`, `updating`, `attach-failed`, `unavailable` | Is code scanning set up, and did the security configuration attach? |
 | `execution` | `success`, `failure`, `timed-out`, `cancelled`, `action-required`, `startup-failure`, `in-progress`, `queued`, `no-workflow`, `no-completed-run` | Did the most recent analysis run succeed, fail, or never run? |
-| `freshness` | `current`, `stale`, `never-scanned` | How long ago did this repository last scan successfully? |
+| `freshness` | `current`, `stale`, `never-scanned` | How long ago did this repository last scan successfully, against the threshold for its scan schedule? |
 | `coverage` | `complete`, `partial`, `gap`, `no-supported-languages` | Are all supported languages actually being analyzed? |
 
 Those four roll up into one `overall` severity, used for sorting and summary
@@ -159,10 +159,70 @@ Narrowing:
 | `--skip-archived`, `--skip-forks` | Exclude archived or forked repositories. |
 | `--security-configuration` | Only repositories attached to a named security configuration. |
 | `--property-filter` | Only repositories whose custom property matches, as `NAME=VALUE`. |
-| `--stale-after` | Freshness threshold, default `8d`. |
+| `--activity` | Only `active` or `inactive` repositories. |
+| `--stale-after` | Freshness threshold for active repositories, default `8d`. |
+| `--stale-after-inactive` | Freshness threshold for inactive repositories, default `32d`. Use `off` to skip. |
+| `--inactive-after` | Time without a push that makes a repository inactive, default `180d`. |
 
 `--match`, `--exclude`, `--visibility` and `--property-filter` are applied
 before any per-repository request, so excluded repositories cost nothing.
+
+### Freshness thresholds and repository activity
+
+GitHub scans default setup repositories weekly, **except** repositories with no
+pushes or pull requests for six months or more. When an organization enables
+*Keep scheduled scans running every 30 days for inactive repositories*, those
+are scanned monthly instead
+([changelog](https://github.blog/changelog/2026-06-09-periodic-code-scanning-of-inactive-repositories/)).
+
+Holding a monthly-scanned repository to a weekly threshold would report it as
+stale for 23 days out of every 30, so two thresholds are applied:
+
+| Flag | Default | Applies to |
+| --- | --- | --- |
+| `--stale-after` | `8d` | Active repositories (weekly schedule plus a day of tolerance) |
+| `--stale-after-inactive` | `32d` | Inactive repositories (monthly schedule plus tolerance) |
+| `--inactive-after` | `180d` | Time without a push after which a repository counts as inactive |
+
+Each repository reports which threshold was applied, so a stale verdict always
+explains itself:
+
+```text
+HEALTH  REPOSITORY   LAST SCAN               DETAIL
+stale   org/Infinity 204 days ago (inactive) no successful analysis within 32d (inactive); this
+                                             repository has had no recent pushes, so GitHub scans
+                                             it monthly at most
+stale   org/Web      20 days ago             no successful analysis within 8d
+```
+
+Filter to one population with `--activity`:
+
+```bash
+# Actively developed repositories that are not being scanned. Usually the
+# most urgent, because the code is changing.
+gh ghas-audit code-scanning status -o my-org --activity active --status stale,failing,stalled
+
+# Dormant repositories that have fallen out of the monthly cycle.
+gh ghas-audit code-scanning status -o my-org --activity inactive --status stale
+```
+
+If your organization has **not** enabled monthly scanning of inactive
+repositories, those repositories stop being scanned altogether and would be
+reported stale indefinitely. Turn the check off for them:
+
+```bash
+gh ghas-audit code-scanning status -o my-org --stale-after-inactive off
+```
+
+Use `--inactive-after off` to disable the distinction entirely and hold every
+repository to `--stale-after`.
+
+Two caveats worth knowing. Activity is inferred from the repository push
+timestamp, which is the closest public signal to GitHub's own "no pushes or
+pull requests" rule; they agree in practice, because opening a pull request
+requires pushing a branch, but this is an approximation. And the organization
+setting itself is not exposed by any API, so the tool cannot detect whether
+monthly scanning is switched on: `--stale-after-inactive` is how you tell it.
 
 ### Grouping by application
 
@@ -192,9 +252,9 @@ selects a repository whose `Project` is `INFINITY, Internal`.
 
 ### Freshness threshold
 
-Default setup runs on a weekly schedule, so the default `--stale-after` is
-`8d`: one week plus a day of scheduling tolerance. Adjust it to match your own
-policy:
+See [Freshness thresholds and repository activity](#freshness-thresholds-and-repository-activity)
+above. In short, active repositories are held to `--stale-after` (default
+`8d`) and inactive ones to `--stale-after-inactive` (default `32d`):
 
 ```bash
 gh ghas-audit code-scanning status --organization my-org --stale-after 14d

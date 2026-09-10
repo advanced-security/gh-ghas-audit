@@ -117,6 +117,11 @@ type scenario struct {
 	databases     any
 	attachment    string
 	configuration string
+	// pushedAt is how long ago the repository was last pushed to. Zero uses a
+	// recent default.
+	pushedAt time.Duration
+	// noPushedAt omits push history entirely.
+	noPushedAt bool
 }
 
 const testOrg = "test-org"
@@ -131,13 +136,23 @@ func buildClient(t *testing.T, scenarios ...scenario) *fakeClient {
 		for _, language := range item.languages {
 			languageNodes = append(languageNodes, map[string]string{"name": language})
 		}
+
+		pushAge := item.pushedAt
+		if pushAge == 0 {
+			pushAge = 24 * time.Hour
+		}
+		var pushedAt any
+		if !item.noPushedAt {
+			pushedAt = time.Now().Add(-pushAge).Format(time.RFC3339)
+		}
+
 		nodes = append(nodes, map[string]any{
 			"name":             item.name,
 			"url":              "https://github.com/" + testOrg + "/" + item.name,
 			"isArchived":       false,
 			"isFork":           false,
 			"visibility":       "PRIVATE",
-			"pushedAt":         time.Now().Add(-24 * time.Hour).Format(time.RFC3339),
+			"pushedAt":         pushedAt,
 			"defaultBranchRef": map[string]string{"name": "main"},
 			"languages":        map[string]any{"nodes": languageNodes},
 		})

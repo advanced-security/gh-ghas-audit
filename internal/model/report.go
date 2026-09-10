@@ -6,6 +6,28 @@ import (
 	"time"
 )
 
+// Activity describes whether a repository is still being worked on, which
+// determines how often GitHub schedules its scans.
+//
+// Code scanning runs default setup on a weekly schedule for active
+// repositories. Repositories with no pushes or pull requests for six months or
+// more are scanned every 30 days instead, when the organization enables
+// "Keep scheduled scans running every 30 days for inactive repositories".
+// Applying the weekly threshold to those would report them as stale for 23
+// days out of every 30.
+type Activity string
+
+const (
+	// ActivityActive means the repository has recent pushes and is expected
+	// to scan on the weekly schedule.
+	ActivityActive Activity = "active"
+	// ActivityInactive means the repository has had no pushes for longer than
+	// the inactivity threshold and is expected to scan monthly at most.
+	ActivityInactive Activity = "inactive"
+	// ActivityUnknown means push history was unavailable.
+	ActivityUnknown Activity = "unknown"
+)
+
 // Timestamp is an alias for time.Time so report fields marshal as RFC 3339.
 type Timestamp = time.Time
 
@@ -46,6 +68,8 @@ type Scope struct {
 type Settings struct {
 	StaleAfter            string   `json:"stale_after"`
 	StaleAfterSeconds     float64  `json:"stale_after_seconds"`
+	StaleAfterInactive    string   `json:"stale_after_inactive,omitempty"`
+	InactiveAfter         string   `json:"inactive_after,omitempty"`
 	SkipArchived          bool     `json:"skip_archived"`
 	SkipForks             bool     `json:"skip_forks"`
 	SecurityConfiguration string   `json:"security_configuration,omitempty"`
@@ -131,6 +155,15 @@ type Repo struct {
 	LastSuccessfulScan *Timestamp `json:"last_successful_scan,omitempty"`
 	// StaleDays is how old that evidence is, in whole days.
 	StaleDays *int `json:"stale_days,omitempty"`
+	// Activity records whether GitHub schedules this repository weekly or
+	// monthly, which decides the staleness threshold applied to it.
+	Activity Activity `json:"activity,omitempty"`
+	// DaysSincePush is how long ago the repository last received a push, the
+	// signal behind Activity.
+	DaysSincePush *int `json:"days_since_push,omitempty"`
+	// StaleAfter is the threshold actually applied to this repository, so a
+	// stale verdict can always be explained.
+	StaleAfter string `json:"stale_after,omitempty"`
 
 	Properties  map[string]string `json:"properties,omitempty"`
 	Diagnostics []Diagnostic      `json:"diagnostics,omitempty"`

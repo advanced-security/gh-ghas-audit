@@ -108,10 +108,16 @@ func writeSummary(writer io.Writer, report *model.Report) {
 	}
 
 	fmt.Fprintf(writer, "\n%s\n", bold.Sprintf("Code scanning status: %s", scope))
-	fmt.Fprintf(writer, "%d repositories, %s needing attention, scans older than %s are stale\n",
+	fmt.Fprintf(writer, "%d repositories, %s needing attention. Scans are stale after %s for active repositories",
 		report.Summary.TotalRepositories,
 		color.New(attentionColor(report.Summary.NeedsAttention)).Sprintf("%d", report.Summary.NeedsAttention),
 		report.Settings.StaleAfter)
+	switch report.Settings.StaleAfterInactive {
+	case "", "off":
+		fmt.Fprintln(writer, "; inactive repositories are not checked")
+	default:
+		fmt.Fprintf(writer, " and %s for inactive ones\n", report.Settings.StaleAfterInactive)
+	}
 
 	fmt.Fprintln(writer)
 	for _, severity := range model.AllSeverities() {
@@ -197,17 +203,27 @@ func lastScanCell(repo model.Repo) string {
 		}
 		return "-"
 	}
-	if repo.StaleDays == nil {
-		return repo.LastSuccessfulScan.UTC().Format("2006-01-02")
+
+	age := "unknown"
+	if repo.StaleDays != nil {
+		switch {
+		case *repo.StaleDays == 0:
+			age = "today"
+		case *repo.StaleDays == 1:
+			age = "1 day ago"
+		default:
+			age = fmt.Sprintf("%d days ago", *repo.StaleDays)
+		}
+	} else {
+		age = repo.LastSuccessfulScan.UTC().Format("2006-01-02")
 	}
-	switch {
-	case *repo.StaleDays == 0:
-		return "today"
-	case *repo.StaleDays == 1:
-		return "1 day ago"
-	default:
-		return fmt.Sprintf("%d days ago", *repo.StaleDays)
+
+	// Inactive repositories are on a monthly schedule, so the age alone would
+	// be misleading without saying which threshold it is being judged against.
+	if repo.Activity == model.ActivityInactive {
+		return age + " (inactive)"
 	}
+	return age
 }
 
 // languageCell shows analyzed coverage as a fraction plus any problem

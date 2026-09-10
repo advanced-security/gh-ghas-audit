@@ -34,10 +34,13 @@ type statusOptions struct {
 	format     string
 	outputPath string
 
-	staleAfter      string
-	properties      []string
-	groupByProperty string
-	propertyFilters []string
+	staleAfter         string
+	staleAfterInactive string
+	inactiveAfter      string
+	activityFilter     []string
+	properties         []string
+	groupByProperty    string
+	propertyFilters    []string
 
 	statusFilter     []string
 	languageFilter   []string
@@ -110,7 +113,13 @@ func init() {
 		"Write output to a file instead of stdout")
 
 	flags.StringVar(&statusOpts.staleAfter, "stale-after", "8d",
-		"Age after which a successful scan is considered stale (default setup runs weekly, so this allows a one day buffer)")
+		"Age after which an active repository's scan is stale (default setup scans weekly, so this allows a one day buffer)")
+	flags.StringVar(&statusOpts.staleAfterInactive, "stale-after-inactive", "32d",
+		"Age after which an inactive repository's scan is stale. GitHub scans repositories with no recent pushes every 30 days. Use 'off' to skip the check")
+	flags.StringVar(&statusOpts.inactiveAfter, "inactive-after", "180d",
+		"Time without a push after which a repository counts as inactive and uses the monthly threshold. Use 'off' to treat every repository as active")
+	flags.StringSliceVar(&statusOpts.activityFilter, "activity", nil,
+		"Only report repositories with this activity: active or inactive")
 
 	flags.StringSliceVar(&statusOpts.properties, "property", nil,
 		"Custom property to include as a column (repeatable)")
@@ -174,6 +183,18 @@ func runCodeScanningStatus(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return fmt.Errorf("invalid --stale-after: %w", err)
 	}
+	staleAfterInactive, err := parseOptionalDuration(statusOpts.staleAfterInactive)
+	if err != nil {
+		return fmt.Errorf("invalid --stale-after-inactive: %w", err)
+	}
+	inactiveAfter, err := parseOptionalDuration(statusOpts.inactiveAfter)
+	if err != nil {
+		return fmt.Errorf("invalid --inactive-after: %w", err)
+	}
+	activityFilter, err := parseActivities(statusOpts.activityFilter)
+	if err != nil {
+		return err
+	}
 
 	statusFilter, err := parseSeverities(statusOpts.statusFilter, "--status")
 	if err != nil {
@@ -236,6 +257,8 @@ func runCodeScanningStatus(cmd *cobra.Command, _ []string) error {
 		SkipForks:             SkipForks,
 		SecurityConfiguration: SecurityConfiguration,
 		StaleAfter:            staleAfter,
+		StaleAfterInactive:    staleAfterInactive,
+		InactiveAfter:         inactiveAfter,
 		Concurrency:           statusOpts.concurrency,
 		Properties:            statusOpts.properties,
 		GroupByProperty:       statusOpts.groupByProperty,
@@ -265,7 +288,7 @@ func runCodeScanningStatus(cmd *cobra.Command, _ []string) error {
 		progress(fmt.Sprintf("warning: cache could not be saved: %v", err))
 	}
 
-	applyFilters(report, statusFilter, languageFilter, statusOpts.groupByProperty)
+	applyFilters(report, statusFilter, languageFilter, activityFilter, statusOpts.groupByProperty)
 
 	if err := writeReport(report, format); err != nil {
 		return err
@@ -323,10 +346,17 @@ func buildCache() (*cache.Store, error) {
 	return store, nil
 }
 
-// applyFilters narrows the report to the requested statuses and languages and
-// recomputes the summary, so displayed counts always match displayed rows.
-func applyFilters(report *model.Report, severities []model.Severity, languages []model.Language, groupBy string) {
-	if len(severities) == 0 && len(languages) == 0 {
+// applyFilters narrows the report to the requested statuses, languages and
+// activity, and recomputes the summary so displayed counts always match
+// displayed rows.
+func applyFilters(
+	report *model.Report,
+	severities []model.Severity,
+	languages []model.Language,
+	activities []model.Activity,
+	groupBy string,
+) {
+	if len(severities) == 0 && len(languages) == 0 && len(activities) == 0 {
 		return
 	}
 
@@ -338,6 +368,10 @@ func applyFilters(report *model.Report, severities []model.Severity, languages [
 	for _, language := range languages {
 		languageSet[language] = true
 	}
+	activitySet := map[model.Activity]bool{}
+	for _, activity := range activities {
+		activitySet[activity] = true
+	}
 
 	filtered := report.Repositories[:0]
 	for _, repo := range report.Repositories {
@@ -347,12 +381,42 @@ func applyFilters(report *model.Report, severities []model.Severity, languages [
 		if len(languageSet) > 0 && !repoHasLanguage(repo, languageSet) {
 			continue
 		}
+		if len(activitySet) > 0 && !activitySet[repo.Activity] {
+			continue
+		}
 		filtered = append(filtered, repo)
 	}
 
 	report.Repositories = filtered
 	report.Summary = model.BuildSummary(report.Repositories, groupBy)
 	report.Organizations = model.BuildOrgReports(report.Repositories)
+}
+
+// parseActivities resolves user-supplied activity names.
+func parseActivities(values []string) ([]model.Activity, error) {
+	var activities []model.Activity
+	for _, value := range splitList(strings.Join(values, ",")) {
+		switch model.Activity(strings.ToLower(strings.TrimSpace(value))) {
+		case model.ActivityActive:
+			activities = append(activities, model.ActivityActive)
+		case model.ActivityInactive:
+			activities = append(activities, model.ActivityInactive)
+		case model.ActivityUnknown:
+			activities = append(activities, model.ActivityUnknown)
+		default:
+			return nil, fmt.Errorf("invalid --activity value %q; expected active, inactive or unknown", value)
+		}
+	}
+	return activities, nil
+}
+
+// parseOptionalDuration parses a duration that can be switched off entirely.
+func parseOptionalDuration(value string) (time.Duration, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "off", "none", "never", "0":
+		return 0, nil
+	}
+	return parseDuration(value)
 }
 
 func repoHasLanguage(repo model.Repo, wanted map[model.Language]bool) bool {

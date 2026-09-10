@@ -59,6 +59,7 @@ func (c *Collector) collectRepository(ctx context.Context, org string, source ap
 	repo.UnsupportedLanguages = unsupportedLanguages(source)
 
 	evidence := &evidenceState{}
+	c.classifyActivity(&repo)
 
 	repo.Configuration.SecurityConfiguration = extra.ConfigurationName
 	repo.Configuration.AttachmentStatus = extra.AttachmentStatus
@@ -116,6 +117,8 @@ func (c *Collector) collectRepository(ctx context.Context, org string, source ap
 // asserted healthy on the strength of a check that never ran.
 func finalizeStatus(repo *model.Repo, hasWarning bool) {
 	repo.Status.Incomplete = len(repo.Errors) > 0
+	repo.Status.Activity = repo.Activity
+	repo.Status.StaleAfter = repo.StaleAfter
 	model.Classify(&repo.Status, hasWarning)
 }
 
@@ -560,7 +563,15 @@ func finalizeLanguages(repo *model.Repo, languages model.LanguageSet) {
 
 // freshness determines whether successful scan evidence is recent enough,
 // which is the question behind "prove a scan ran and when".
+//
+// The threshold depends on how often GitHub actually schedules the repository.
+// Active repositories scan weekly; repositories with no pushes for six months
+// or more scan every 30 days at most, so holding them to the weekly threshold
+// would report them stale for most of each cycle.
 func (c *Collector) freshness(repo *model.Repo) model.FreshnessStatus {
+	threshold, label := c.staleThreshold(repo)
+	repo.StaleAfter = label
+
 	newest := newestSuccessfulEvidence(repo)
 	if newest == nil {
 		return model.FreshNever
@@ -571,10 +582,55 @@ func (c *Collector) freshness(repo *model.Repo) model.FreshnessStatus {
 	days := int(age.Hours() / 24)
 	repo.StaleDays = &days
 
-	if age > c.options.StaleAfter {
+	// A threshold of zero disables staleness for this class of repository,
+	// which is what an organization wants when it has not enabled monthly
+	// scanning of inactive repositories.
+	if threshold <= 0 {
+		return model.FreshCurrent
+	}
+	if age > threshold {
 		return model.FreshStale
 	}
 	return model.FreshCurrent
+}
+
+// classifyActivity records how long ago the repository was last pushed to and
+// whether that makes it inactive.
+//
+// The repository push timestamp is the closest public signal to GitHub's own
+// "no pushes or pull requests" rule. Opening a pull request requires pushing a
+// branch, so the two agree in practice, but this remains an approximation.
+func (c *Collector) classifyActivity(repo *model.Repo) {
+	if c.options.InactiveAfter <= 0 {
+		repo.Activity = model.ActivityActive
+		return
+	}
+	if repo.PushedAt == nil {
+		repo.Activity = model.ActivityUnknown
+		return
+	}
+
+	since := c.now().Sub(*repo.PushedAt)
+	days := int(since.Hours() / 24)
+	repo.DaysSincePush = &days
+
+	if since >= c.options.InactiveAfter {
+		repo.Activity = model.ActivityInactive
+		return
+	}
+	repo.Activity = model.ActivityActive
+}
+
+// staleThreshold returns the freshness threshold for a repository and a label
+// explaining which one was applied.
+func (c *Collector) staleThreshold(repo *model.Repo) (time.Duration, string) {
+	if repo.Activity == model.ActivityInactive {
+		if c.options.StaleAfterInactive <= 0 {
+			return 0, "not checked (inactive)"
+		}
+		return c.options.StaleAfterInactive, formatDuration(c.options.StaleAfterInactive) + " (inactive)"
+	}
+	return c.options.StaleAfter, formatDuration(c.options.StaleAfter)
 }
 
 // newestSuccessfulEvidence prefers the last successful run, falling back to the

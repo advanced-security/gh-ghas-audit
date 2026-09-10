@@ -25,6 +25,8 @@ permissions:
 jobs:
   report:
     runs-on: ubuntu-latest
+    # App installation tokens last one hour. This example is for shorter runs.
+    # Split larger scopes or run the CLI with suitable longer-lived credentials.
     timeout-minutes: 60
     steps:
       - name: Generate an organization-scoped token

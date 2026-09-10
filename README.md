@@ -201,6 +201,8 @@ GitHub App installation tokens work per organization, not for enterprise discove
 
 Install and invoke the CLI in a workflow. [`examples/code-scanning-status.yml`](examples/code-scanning-status.yml) uses App authentication, cache reuse, one collection, a job summary and artifact upload.
 
+The App-token example is limited to runs under one hour. Split larger scopes or run long diagnostics directly with suitable longer-lived credentials.
+
 ## Upgrading from 1.x
 
 **V2 replaces the legacy implementation.** There is no `status` subcommand or compatibility implementation.

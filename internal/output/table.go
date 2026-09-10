@@ -50,6 +50,11 @@ func WriteTable(writer io.Writer, report *model.Report, opts TableOptions) error
 
 	if len(report.Repositories) == 0 {
 		fmt.Fprintln(writer, "\nNo repositories matched the current scope and filters.")
+		// The footer still has to run. It carries the warnings and the
+		// incomplete-report notice, and without them a scan in which every
+		// organization failed is indistinguishable from one that legitimately
+		// matched nothing.
+		writeFooter(writer, report)
 		return nil
 	}
 
@@ -300,15 +305,26 @@ func wrap(colour *color.Color) func(string) string {
 
 // PropertyColumns returns a stable, de-duplicated list of property names to
 // include as columns.
+//
+// Property lookup is case-insensitive, so names are folded before comparison.
+// Organizations in the same enterprise routinely define the same property with
+// different capitalization, and treating those as distinct would emit two
+// columns that PropertyValue then fills with identical values.
 func PropertyColumns(report *model.Report) []string {
-	seen := map[string]bool{}
+	// Keyed by folded name, holding the spelling chosen for display.
+	seen := map[string]string{}
 	for _, repo := range report.Repositories {
 		for name := range repo.Properties {
-			seen[name] = true
+			folded := strings.ToLower(name)
+			// Prefer the lexicographically smallest spelling so the column
+			// heading does not depend on map iteration order.
+			if existing, ok := seen[folded]; !ok || name < existing {
+				seen[folded] = name
+			}
 		}
 	}
 	names := make([]string, 0, len(seen))
-	for name := range seen {
+	for _, name := range seen {
 		names = append(names, name)
 	}
 	sort.Strings(names)

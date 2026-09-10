@@ -121,27 +121,27 @@ func TestLogArchivesBypassTheCache(t *testing.T) {
 // memoryCache is a minimal in-memory ResponseCache for tests.
 type memoryCache struct {
 	mu      sync.Mutex
-	entries map[string][2]string
+	entries map[string][3]string
 }
 
 func newMemoryCache() *memoryCache {
-	return &memoryCache{entries: map[string][2]string{}}
+	return &memoryCache{entries: map[string][3]string{}}
 }
 
-func (m *memoryCache) Get(key string) (string, []byte, bool) {
+func (m *memoryCache) Get(key string) (string, []byte, string, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	entry, ok := m.entries[key]
 	if !ok {
-		return "", nil, false
+		return "", nil, "", false
 	}
-	return entry[0], []byte(entry[1]), true
+	return entry[0], []byte(entry[1]), entry[2], true
 }
 
-func (m *memoryCache) Put(key string, etag string, body []byte) {
+func (m *memoryCache) Put(key string, etag string, body []byte, next string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.entries[key] = [2]string{etag, string(body)}
+	m.entries[key] = [3]string{etag, string(body), next}
 }
 
 func TestGetJSONDecodesResponse(t *testing.T) {

@@ -24,12 +24,22 @@ import (
 
 // entry is a single cached response as stored on disk.
 type entry struct {
-	URL       string    `json:"url"`
-	ETag      string    `json:"etag"`
-	Body      []byte    `json:"body"`
-	StoredAt  time.Time `json:"stored_at"`
-	SchemaKey string    `json:"schema_key"`
+	URL      string    `json:"url"`
+	ETag     string    `json:"etag"`
+	Body     []byte    `json:"body"`
+	StoredAt time.Time `json:"stored_at"`
+	// Next is the URL of the following page, captured from the Link header of
+	// the original response. A 304 is not required to repeat Link, so without
+	// this a revalidated first page would look like the last page and the
+	// remainder of a paginated collection would be silently dropped.
+	Next      string `json:"next,omitempty"`
+	SchemaKey string `json:"schema_key"`
 }
+
+// format versions the on-disk entry layout. It is combined with the caller's
+// schema key so that adding a field to entry can never silently reuse older
+// entries written without it.
+const format = "2"
 
 // Store is a concurrency-safe ETag cache backed by a directory of JSON files.
 // A nil *Store is valid and behaves as a disabled cache, so callers never need
@@ -67,9 +77,11 @@ func New(opts Options) *Store {
 		return &Store{disable: true}
 	}
 	store := &Store{
-		dir:       opts.Dir,
-		maxAge:    opts.MaxAge,
-		schemaKey: opts.SchemaKey,
+		dir:    opts.Dir,
+		maxAge: opts.MaxAge,
+		// The on-disk format is folded into the key so an older cache written
+		// without the current fields is never reused.
+		schemaKey: opts.SchemaKey + "|" + format,
 	}
 	if err := os.MkdirAll(opts.Dir, 0o700); err != nil {
 		store.disable = true
@@ -77,25 +89,28 @@ func New(opts Options) *Store {
 	return store
 }
 
-// Get returns a cached ETag and body for a URL.
-func (s *Store) Get(key string) (string, []byte, bool) {
+// Get returns the cached ETag, body and next page URL for a URL.
+func (s *Store) Get(key string) (etag string, body []byte, next string, ok bool) {
 	if s == nil || s.disable {
-		return "", nil, false
+		return "", nil, "", false
 	}
 
 	cached, err := s.readFile(key)
 	if err != nil {
-		return "", nil, false
+		return "", nil, "", false
 	}
 	if cached.SchemaKey != s.schemaKey || s.expired(cached) {
-		return "", nil, false
+		return "", nil, "", false
 	}
-	return cached.ETag, cached.Body, true
+	return cached.ETag, cached.Body, cached.Next, true
 }
 
-// Put records an ETag and body for a URL, writing it straight to disk so no
+// Put records a response for a URL, writing it straight to disk so no
 // response body is retained in memory after the request completes.
-func (s *Store) Put(key string, etag string, body []byte) {
+//
+// The next page URL is stored with the body because a 304 revalidation is not
+// required to repeat the Link header.
+func (s *Store) Put(key string, etag string, body []byte, next string) {
 	if s == nil || s.disable || etag == "" {
 		return
 	}
@@ -104,6 +119,7 @@ func (s *Store) Put(key string, etag string, body []byte) {
 		URL:       key,
 		ETag:      etag,
 		Body:      body,
+		Next:      next,
 		StoredAt:  time.Now(),
 		SchemaKey: s.schemaKey,
 	}

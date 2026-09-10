@@ -125,6 +125,10 @@ type Repo struct {
 	Fork          bool       `json:"fork"`
 	DefaultBranch string     `json:"default_branch"`
 	PushedAt      *Timestamp `json:"pushed_at,omitempty"`
+	// LastActivityAt is the most recent push or pull request update. It is
+	// what inactivity is judged on, because a pull request from a fork never
+	// pushes to the parent repository.
+	LastActivityAt *Timestamp `json:"last_activity_at,omitempty"`
 
 	Status        Status          `json:"status"`
 	Configuration ConfigDetail    `json:"configuration"`

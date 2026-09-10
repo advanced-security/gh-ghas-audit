@@ -158,9 +158,12 @@ func WriteCSV(writer io.Writer, report *model.Report, propertyColumns []string) 
 }
 
 func repositoryRow(repo model.Repo) []string {
-	latest := repo.Execution.LatestCompletedRun
+	// The column is the latest run, so it must reflect the latest run. Using
+	// the completed run first would date and link an older run while the
+	// execution column reports a newer one as in progress.
+	latest := repo.Execution.LatestRun
 	if latest == nil {
-		latest = repo.Execution.LatestRun
+		latest = repo.Execution.LatestCompletedRun
 	}
 
 	return []string{

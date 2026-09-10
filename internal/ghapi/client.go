@@ -45,9 +45,14 @@ var defaultSecondaryWait = 60 * time.Second
 // internal/cache; declared here as an interface to keep the dependency
 // one-directional.
 type ResponseCache interface {
-	Get(key string) (etag string, body []byte, ok bool)
-	Put(key string, etag string, body []byte)
+	Get(key string) (etag string, body []byte, next string, ok bool)
+	Put(key string, etag string, body []byte, next string)
 }
+
+// ErrResponseTooLarge is returned when a size-limited request produced a body
+// bigger than the caller's remaining budget. Callers treat it as the budget
+// being spent rather than as a fault in the repository.
+var ErrResponseTooLarge = errors.New("response exceeded the configured size limit")
 
 // StatusError is returned for non-successful HTTP responses.
 type StatusError struct {
@@ -232,7 +237,7 @@ func (c *Client) resolveURL(pathOrURL string) string {
 // It uses stored ETags to issue conditional requests; a 304 response is served
 // from cache and does not count against the primary rate limit.
 func (c *Client) GetJSON(ctx context.Context, path string, out any) error {
-	body, _, err := c.get(ctx, path, true)
+	body, _, err := c.get(ctx, path, true, 0)
 	if err != nil {
 		return err
 	}
@@ -253,7 +258,15 @@ func (c *Client) GetJSON(ctx context.Context, path string, out any) error {
 // that would dominate cache size for no benefit, since they are only ever read
 // once per run.
 func (c *Client) GetBytes(ctx context.Context, path string) ([]byte, error) {
-	body, _, err := c.get(ctx, path, false)
+	body, _, err := c.get(ctx, path, false, 0)
+	return body, err
+}
+
+// GetBytesLimited is GetBytes with a hard cap on the response size. It exists
+// so an unbounded download, such as an Actions log archive, cannot overshoot a
+// caller's byte budget in a single request.
+func (c *Client) GetBytesLimited(ctx context.Context, path string, limit int64) ([]byte, error) {
+	body, _, err := c.get(ctx, path, false, limit)
 	return body, err
 }
 
@@ -262,7 +275,7 @@ func (c *Client) GetBytes(ctx context.Context, path string) ([]byte, error) {
 func (c *Client) GetPaginatedJSON(ctx context.Context, path string, collect func(page []byte) error) error {
 	next := path
 	for next != "" {
-		body, link, err := c.get(ctx, next, true)
+		body, link, err := c.get(ctx, next, true, 0)
 		if err != nil {
 			return err
 		}
@@ -278,15 +291,17 @@ func (c *Client) GetPaginatedJSON(ctx context.Context, path string, collect func
 
 // get executes a conditional GET with retries and returns the body plus the
 // URL of the next page, if any.
-func (c *Client) get(ctx context.Context, pathOrURL string, useCache bool) ([]byte, string, error) {
+func (c *Client) get(ctx context.Context, pathOrURL string, useCache bool, limit int64) ([]byte, string, error) {
 	target := c.resolveURL(pathOrURL)
 
 	var cachedETag string
 	var cachedBody []byte
+	var cachedNext string
 	if useCache && c.cache != nil {
-		if etag, body, ok := c.cache.Get(target); ok {
+		if etag, body, storedNext, ok := c.cache.Get(target); ok {
 			cachedETag = etag
 			cachedBody = body
+			cachedNext = storedNext
 		}
 	}
 
@@ -295,7 +310,7 @@ func (c *Client) get(ctx context.Context, pathOrURL string, useCache bool) ([]by
 		if err := c.acquire(ctx); err != nil {
 			return nil, "", err
 		}
-		body, next, status, headers, err := c.do(ctx, target, cachedETag)
+		body, next, status, headers, err := c.do(ctx, target, cachedETag, limit)
 		c.release()
 
 		if err != nil {
@@ -313,12 +328,18 @@ func (c *Client) get(ctx context.Context, pathOrURL string, useCache bool) ([]by
 		switch {
 		case status == http.StatusNotModified:
 			c.stats.CacheHits.Add(1)
+			// A 304 is not obliged to repeat the Link header. Falling back to
+			// the stored next page URL is what stops a revalidated first page
+			// from looking like the only page.
+			if next == "" {
+				next = cachedNext
+			}
 			return cachedBody, next, nil
 
 		case status >= 200 && status < 300:
 			if useCache && c.cache != nil {
 				if etag := headers.Get("ETag"); etag != "" {
-					c.cache.Put(target, etag, body)
+					c.cache.Put(target, etag, body, next)
 				}
 			}
 			return body, next, nil
@@ -360,7 +381,7 @@ func (c *Client) get(ctx context.Context, pathOrURL string, useCache bool) ([]by
 	return nil, "", fmt.Errorf("request to %s failed after %d attempts", target, maxAttempts)
 }
 
-func (c *Client) do(ctx context.Context, target, etag string) ([]byte, string, int, http.Header, error) {
+func (c *Client) do(ctx context.Context, target, etag string, limit int64) ([]byte, string, int, http.Header, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
 		return nil, "", 0, nil, err
@@ -382,9 +403,21 @@ func (c *Client) do(ctx context.Context, target, etag string) ([]byte, string, i
 		}
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	reader := io.Reader(resp.Body)
+	if limit > 0 {
+		// One extra byte distinguishes "exactly at the limit" from
+		// "truncated", so an oversized archive can be reported rather than
+		// silently analyzed as if it were complete.
+		reader = io.LimitReader(resp.Body, limit+1)
+	}
+
+	body, err := io.ReadAll(reader)
 	if err != nil {
 		return nil, "", resp.StatusCode, resp.Header, err
+	}
+	if limit > 0 && int64(len(body)) > limit {
+		return nil, "", resp.StatusCode, resp.Header,
+			fmt.Errorf("%w: response from %s exceeded %d bytes", ErrResponseTooLarge, target, limit)
 	}
 
 	return body, nextPageURL(resp.Header.Get("Link")), resp.StatusCode, resp.Header, nil

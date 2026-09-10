@@ -44,7 +44,11 @@ func (c *Collector) collectRepository(ctx context.Context, org string, source ap
 		Fork:          source.IsFork,
 		DefaultBranch: defaultBranchOf(source),
 		PushedAt:      source.PushedAt,
-		Properties:    extra.Properties,
+		// Inactivity is judged on the newer of the last push and the last
+		// pull request update, so a repository kept alive by fork pull
+		// requests is not given the permissive inactive threshold.
+		LastActivityAt: source.LastActivityAt,
+		Properties:     extra.Properties,
 	}
 	if repo.URL == "" {
 		repo.URL = fmt.Sprintf("https://%s/%s/%s", c.client.Host(), org, source.Name)
@@ -674,12 +678,20 @@ func (c *Collector) classifyActivity(repo *model.Repo) {
 		repo.Activity = model.ActivityActive
 		return
 	}
-	if repo.PushedAt == nil {
+	// Activity means any signal that GitHub would count as the repository
+	// being in use. A pull request opened from a fork updates the parent's
+	// pull requests without ever pushing to it, so the newer of the two is
+	// the closest public approximation of GitHub's own rule.
+	activity := repo.LastActivityAt
+	if activity == nil {
+		activity = repo.PushedAt
+	}
+	if activity == nil {
 		repo.Activity = model.ActivityUnknown
 		return
 	}
 
-	since := c.now().Sub(*repo.PushedAt)
+	since := c.now().Sub(*activity)
 	days := int(since.Hours() / 24)
 	repo.DaysSincePush = &days
 

@@ -9,13 +9,13 @@ import (
 func TestPutAndGetRoundTrip(t *testing.T) {
 	store := New(Options{Dir: t.TempDir(), SchemaKey: "v1"})
 
-	if _, _, ok := store.Get("https://api.github.com/thing"); ok {
+	if _, _, _, ok := store.Get("https://api.github.com/thing"); ok {
 		t.Fatal("empty cache must not report a hit")
 	}
 
-	store.Put("https://api.github.com/thing", `"etag-1"`, []byte(`{"value":1}`))
+	store.Put("https://api.github.com/thing", `"etag-1"`, []byte(`{"value":1}`), "")
 
-	etag, body, ok := store.Get("https://api.github.com/thing")
+	etag, body, _, ok := store.Get("https://api.github.com/thing")
 	if !ok || etag != `"etag-1"` || string(body) != `{"value":1}` {
 		t.Fatalf("Get returned %q, %q, %v", etag, body, ok)
 	}
@@ -25,13 +25,13 @@ func TestEntriesSurviveAcrossStores(t *testing.T) {
 	dir := t.TempDir()
 
 	first := New(Options{Dir: dir, SchemaKey: "v1"})
-	first.Put("https://api.github.com/thing", `"etag-1"`, []byte(`{"value":1}`))
+	first.Put("https://api.github.com/thing", `"etag-1"`, []byte(`{"value":1}`), "")
 	if err := first.Save(); err != nil {
 		t.Fatalf("Save returned an error: %v", err)
 	}
 
 	second := New(Options{Dir: dir, SchemaKey: "v1"})
-	etag, body, ok := second.Get("https://api.github.com/thing")
+	etag, body, _, ok := second.Get("https://api.github.com/thing")
 	if !ok || etag != `"etag-1"` || string(body) != `{"value":1}` {
 		t.Fatalf("a saved entry must be readable by a later run, got %q, %q, %v", etag, body, ok)
 	}
@@ -43,13 +43,13 @@ func TestSchemaChangeInvalidatesEntries(t *testing.T) {
 	dir := t.TempDir()
 
 	first := New(Options{Dir: dir, SchemaKey: "v1"})
-	first.Put("https://api.github.com/thing", `"etag-1"`, []byte(`{"value":1}`))
+	first.Put("https://api.github.com/thing", `"etag-1"`, []byte(`{"value":1}`), "")
 	if err := first.Save(); err != nil {
 		t.Fatalf("Save returned an error: %v", err)
 	}
 
 	second := New(Options{Dir: dir, SchemaKey: "v2"})
-	if _, _, ok := second.Get("https://api.github.com/thing"); ok {
+	if _, _, _, ok := second.Get("https://api.github.com/thing"); ok {
 		t.Fatal("entries from a different schema version must be ignored")
 	}
 }
@@ -58,14 +58,14 @@ func TestMaxAgeExpiresEntries(t *testing.T) {
 	dir := t.TempDir()
 
 	first := New(Options{Dir: dir, SchemaKey: "v1"})
-	first.Put("https://api.github.com/thing", `"etag-1"`, []byte(`{"value":1}`))
+	first.Put("https://api.github.com/thing", `"etag-1"`, []byte(`{"value":1}`), "")
 	if err := first.Save(); err != nil {
 		t.Fatalf("Save returned an error: %v", err)
 	}
 
 	expired := New(Options{Dir: dir, SchemaKey: "v1", MaxAge: time.Nanosecond})
 	time.Sleep(2 * time.Millisecond)
-	if _, _, ok := expired.Get("https://api.github.com/thing"); ok {
+	if _, _, _, ok := expired.Get("https://api.github.com/thing"); ok {
 		t.Fatal("entries older than the maximum age must be ignored")
 	}
 }
@@ -73,7 +73,7 @@ func TestMaxAgeExpiresEntries(t *testing.T) {
 func TestClearRemovesEntries(t *testing.T) {
 	dir := t.TempDir()
 	store := New(Options{Dir: dir, SchemaKey: "v1"})
-	store.Put("https://api.github.com/thing", `"etag-1"`, []byte(`{"value":1}`))
+	store.Put("https://api.github.com/thing", `"etag-1"`, []byte(`{"value":1}`), "")
 	if err := store.Save(); err != nil {
 		t.Fatalf("Save returned an error: %v", err)
 	}
@@ -81,12 +81,12 @@ func TestClearRemovesEntries(t *testing.T) {
 	if err := store.Clear(); err != nil {
 		t.Fatalf("Clear returned an error: %v", err)
 	}
-	if _, _, ok := store.Get("https://api.github.com/thing"); ok {
+	if _, _, _, ok := store.Get("https://api.github.com/thing"); ok {
 		t.Fatal("Clear must discard entries")
 	}
 
 	reopened := New(Options{Dir: dir, SchemaKey: "v1"})
-	if _, _, ok := reopened.Get("https://api.github.com/thing"); ok {
+	if _, _, _, ok := reopened.Get("https://api.github.com/thing"); ok {
 		t.Fatal("Clear must remove entries from disk as well as memory")
 	}
 }
@@ -99,8 +99,8 @@ func TestDisabledCacheIsSafe(t *testing.T) {
 		t.Fatal("a cache without a directory must report itself disabled")
 	}
 
-	store.Put("key", "etag", []byte("body"))
-	if _, _, ok := store.Get("key"); ok {
+	store.Put("key", "etag", []byte("body"), "")
+	if _, _, _, ok := store.Get("key"); ok {
 		t.Fatal("a disabled cache must never report a hit")
 	}
 	if err := store.Save(); err != nil {
@@ -116,8 +116,8 @@ func TestDisabledCacheIsSafe(t *testing.T) {
 
 func TestNilStoreIsSafe(t *testing.T) {
 	var store *Store
-	store.Put("key", "etag", []byte("body"))
-	if _, _, ok := store.Get("key"); ok {
+	store.Put("key", "etag", []byte("body"), "")
+	if _, _, _, ok := store.Get("key"); ok {
 		t.Fatal("a nil cache must never report a hit")
 	}
 	if err := store.Save(); err != nil {
@@ -130,8 +130,8 @@ func TestNilStoreIsSafe(t *testing.T) {
 
 func TestEmptyETagIsNotStored(t *testing.T) {
 	store := New(Options{Dir: t.TempDir(), SchemaKey: "v1"})
-	store.Put("key", "", []byte("body"))
-	if _, _, ok := store.Get("key"); ok {
+	store.Put("key", "", []byte("body"), "")
+	if _, _, _, ok := store.Get("key"); ok {
 		t.Fatal("a response without an ETag cannot be revalidated and must not be cached")
 	}
 }

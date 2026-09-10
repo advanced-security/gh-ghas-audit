@@ -111,7 +111,8 @@ func (c *Collector) listRepositories(ctx context.Context, org string) ([]apiRepo
         visibility
         pushedAt
         defaultBranchRef{name}
-        languages(first:30){nodes{name}}
+        pullRequests(first:1,orderBy:{field:UPDATED_AT,direction:DESC}){nodes{updatedAt}}
+        languages(first:100){pageInfo{hasNextPage} nodes{name}}
       }
     }
   }
@@ -129,7 +130,12 @@ func (c *Collector) listRepositories(ctx context.Context, org string) ([]apiRepo
 					} `json:"pageInfo"`
 					Nodes []struct {
 						apiRepository
-						PushedAt *string `json:"pushedAt"`
+						PushedAt     *string `json:"pushedAt"`
+						PullRequests struct {
+							Nodes []struct {
+								UpdatedAt *string `json:"updatedAt"`
+							} `json:"nodes"`
+						} `json:"pullRequests"`
 					} `json:"nodes"`
 				} `json:"repositories"`
 			} `json:"organization"`
@@ -152,8 +158,33 @@ func (c *Collector) listRepositories(ctx context.Context, org string) ([]apiRepo
 			if node.PushedAt != nil {
 				if parsed, err := time.Parse(time.RFC3339, *node.PushedAt); err == nil {
 					repo.PushedAt = &parsed
+					repo.LastActivityAt = &parsed
 				}
 			}
+			// A pull request updated more recently than the last push still
+			// counts as activity for the purposes of scan scheduling.
+			for _, pull := range node.PullRequests.Nodes {
+				if pull.UpdatedAt == nil {
+					continue
+				}
+				parsed, err := time.Parse(time.RFC3339, *pull.UpdatedAt)
+				if err != nil {
+					continue
+				}
+				if repo.LastActivityAt == nil || parsed.After(*repo.LastActivityAt) {
+					repo.LastActivityAt = &parsed
+				}
+			}
+
+			// The languages connection is capped. On the rare repository that
+			// exceeds it, fall back to REST rather than let a supported
+			// language go unseen and report coverage as complete.
+			if repo.Languages.PageInfo.HasNextPage {
+				if names, err := c.repositoryLanguages(ctx, org, repo.Name); err == nil {
+					repo.Languages.Nodes = names
+				}
+			}
+
 			repositories = append(repositories, repo)
 		}
 
@@ -166,6 +197,30 @@ func (c *Collector) listRepositories(ctx context.Context, org string) ([]apiRepo
 	return repositories, nil
 }
 
+// repositoryLanguages reads the full language list for a repository from REST.
+// The endpoint returns every language Linguist detected, with no pagination,
+// so it is the authoritative source when the GraphQL connection is truncated.
+func (c *Collector) repositoryLanguages(ctx context.Context, org, name string) ([]struct {
+	Name string `json:"name"`
+}, error) {
+	languages := map[string]int{}
+	path := fmt.Sprintf("repos/%s/%s/languages", url.PathEscape(org), url.PathEscape(name))
+	if err := c.client.GetJSON(ctx, path, &languages); err != nil {
+		return nil, err
+	}
+
+	names := make([]struct {
+		Name string `json:"name"`
+	}, 0, len(languages))
+	for language := range languages {
+		names = append(names, struct {
+			Name string `json:"name"`
+		}{Name: language})
+	}
+	sort.Slice(names, func(i, j int) bool { return names[i].Name < names[j].Name })
+	return names, nil
+}
+
 // getRepository fetches a single repository plus its languages via REST, used
 // for --repository scope where GraphQL enumeration is unnecessary.
 func (c *Collector) getRepository(ctx context.Context, org, name string) (apiRepository, error) {
@@ -175,12 +230,13 @@ func (c *Collector) getRepository(ctx context.Context, org, name string) (apiRep
 	}
 
 	repo := apiRepository{
-		Name:       rest.Name,
-		URL:        rest.HTMLURL,
-		IsArchived: rest.Archived,
-		IsFork:     rest.Fork,
-		Visibility: strings.ToUpper(rest.Visibility),
-		PushedAt:   rest.PushedAt,
+		Name:           rest.Name,
+		URL:            rest.HTMLURL,
+		IsArchived:     rest.Archived,
+		IsFork:         rest.Fork,
+		Visibility:     strings.ToUpper(rest.Visibility),
+		PushedAt:       rest.PushedAt,
+		LastActivityAt: rest.PushedAt,
 	}
 	if rest.DefaultBranch != "" {
 		repo.DefaultBranchRef = &struct {
@@ -188,14 +244,15 @@ func (c *Collector) getRepository(ctx context.Context, org, name string) (apiRep
 		}{Name: rest.DefaultBranch}
 	}
 
-	languages := map[string]int{}
-	if err := c.client.GetJSON(ctx, fmt.Sprintf("repos/%s/%s/languages", org, name), &languages); err == nil {
-		for language := range languages {
-			repo.Languages.Nodes = append(repo.Languages.Nodes, struct {
-				Name string `json:"name"`
-			}{Name: language})
-		}
+	// A failure here must not be swallowed. Without language evidence an
+	// exhausted rate limit is indistinguishable from an empty repository, and
+	// the scan would report "not applicable" on a report still marked
+	// complete.
+	names, err := c.repositoryLanguages(ctx, org, name)
+	if err != nil {
+		return apiRepository{}, fmt.Errorf("reading languages for %s/%s: %w", org, name, err)
 	}
+	repo.Languages.Nodes = names
 
 	return repo, nil
 }

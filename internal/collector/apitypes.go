@@ -18,10 +18,19 @@ type apiRepository struct {
 		Name string `json:"name"`
 	} `json:"defaultBranchRef"`
 	Languages struct {
+		PageInfo struct {
+			HasNextPage bool `json:"hasNextPage"`
+		} `json:"pageInfo"`
 		Nodes []struct {
 			Name string `json:"name"`
 		} `json:"nodes"`
 	} `json:"languages"`
+	// LastActivityAt is the most recent repository activity, taking pull
+	// request updates into account as well as pushes. A pull request opened
+	// from a fork never pushes to the parent, so pushedAt alone understates
+	// activity and would apply the permissive inactive staleness threshold to
+	// a repository that GitHub still scans weekly.
+	LastActivityAt *time.Time
 }
 
 // restRepository is a repository as returned by the REST repos endpoints. It

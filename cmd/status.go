@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -288,13 +289,19 @@ func runCodeScanningStatus(cmd *cobra.Command, _ []string) error {
 		progress(fmt.Sprintf("warning: cache could not be saved: %v", err))
 	}
 
+	// --fail-on is a compliance gate on what was collected, not on what is
+	// displayed. Evaluating it before the presentation filters stops
+	// "--status healthy --fail-on failing" from exiting successfully while
+	// failing repositories sit in scope.
+	triggered := matchedSeverities(report, failOn)
+
 	applyFilters(report, statusFilter, languageFilter, activityFilter, statusOpts.groupByProperty)
 
 	if err := writeReport(report, format); err != nil {
 		return err
 	}
 
-	if triggered := matchedSeverities(report, failOn); len(triggered) > 0 {
+	if len(triggered) > 0 {
 		fmt.Fprintf(os.Stderr, "\n--fail-on matched: %s\n", strings.Join(triggered, ", "))
 		return &exitCodeError{code: ExitCodeFailOn}
 	}
@@ -389,7 +396,38 @@ func applyFilters(
 
 	report.Repositories = filtered
 	report.Summary = model.BuildSummary(report.Repositories, groupBy)
-	report.Organizations = model.BuildOrgReports(report.Repositories)
+	// Organizations that could not be inspected have no repositories to
+	// rebuild from, so their error entries are carried across. Dropping them
+	// would remove the record of which organization was unreadable while the
+	// report still claims to be incomplete.
+	report.Organizations = mergeOrgErrors(model.BuildOrgReports(report.Repositories), report.Organizations)
+}
+
+// mergeOrgErrors adds back any organization whose collection failed, keeping
+// the merged list sorted by login.
+func mergeOrgErrors(rebuilt []model.OrgReport, previous []model.OrgReport) []model.OrgReport {
+	present := make(map[string]int, len(rebuilt))
+	for index, org := range rebuilt {
+		present[org.Login] = index
+	}
+
+	for _, org := range previous {
+		if org.Error == "" {
+			continue
+		}
+		if index, ok := present[org.Login]; ok {
+			rebuilt[index].Error = org.Error
+			continue
+		}
+		rebuilt = append(rebuilt, model.OrgReport{
+			Login:      org.Login,
+			BySeverity: map[string]int{},
+			Error:      org.Error,
+		})
+	}
+
+	sort.Slice(rebuilt, func(i, j int) bool { return rebuilt[i].Login < rebuilt[j].Login })
+	return rebuilt
 }
 
 // parseActivities resolves user-supplied activity names.

@@ -22,6 +22,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -282,18 +283,58 @@ func (f *Fetcher) Budget() (bool, string) {
 	return false, ""
 }
 
+// reserve atomically claims one repository slot, returning false when the
+// limit is already taken.
+//
+// A separate check followed by an increment would let every concurrent worker
+// pass the check before any of them incremented, so the cap could be exceeded
+// by roughly the worker count.
+func (f *Fetcher) reserve() bool {
+	for {
+		current := f.inspected.Load()
+		if current >= int64(f.limits.MaxRepositories) {
+			return false
+		}
+		if f.inspected.CompareAndSwap(current, current+1) {
+			return true
+		}
+	}
+}
+
+// remainingBytes returns how much of the byte budget is still unspent.
+func (f *Fetcher) remainingBytes() int64 {
+	remaining := f.limits.MaxBytes - f.bytesRead.Load()
+	if remaining < 0 {
+		return 0
+	}
+	return remaining
+}
+
 // Inspect downloads the log archive for a run and returns any findings.
 func (f *Fetcher) Inspect(ctx context.Context, org, repo string, runID int64) ([]model.Diagnostic, error) {
-	if exhausted, _ := f.Budget(); exhausted {
+	remaining := f.remainingBytes()
+	if remaining <= 0 {
 		return nil, nil
 	}
-	f.inspected.Add(1)
+	if !f.reserve() {
+		return nil, nil
+	}
 
 	logPath := fmt.Sprintf("repos/%s/%s/actions/runs/%d/logs",
 		url.PathEscape(org), url.PathEscape(repo), runID)
 
-	archive, err := f.client.GetBytes(ctx, logPath)
+	// Capping the download at the unspent budget means a single oversized
+	// archive cannot overshoot the limit the operator set.
+	archive, err := f.client.GetBytesLimited(ctx, logPath, remaining)
 	if err != nil {
+		// An archive larger than the unspent budget means the budget is
+		// spent. Recording it that way stops every remaining repository from
+		// reporting the same error, and the budget message explains why
+		// inspection stopped.
+		if errors.Is(err, ghapi.ErrResponseTooLarge) {
+			f.bytesRead.Store(f.limits.MaxBytes)
+			return nil, nil
+		}
 		if ghapi.IsNotFound(err) || ghapi.IsForbidden(err) {
 			// Logs expire and can be restricted. An absent archive is not a
 			// failure worth stopping the scan for.

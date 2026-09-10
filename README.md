@@ -47,8 +47,6 @@ gh ghas-audit code-scanning -o my-org --scan-depth config
 gh ghas-audit code-scanning -o my-org --scan-depth diagnostics --deep-scope problematic
 ```
 
-No mode triggers new CodeQL scans. The deprecated `--deep-diagnostics all|problematic` option remains an alias for diagnostics depth and scope.
-
 ## Scope and filters
 
 | Flag | Purpose |

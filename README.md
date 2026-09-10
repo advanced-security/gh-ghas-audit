@@ -185,6 +185,11 @@ By application
 Repositories with no value are grouped under `(not set)`, which also shows how
 complete your property data is.
 
+Property names are matched case-insensitively, so `--group-by-property project`
+finds a property the organization defined as `Project`. Multi-select properties
+match on any one of their values, so `--property-filter Project=Internal`
+selects a repository whose `Project` is `INFINITY, Internal`.
+
 ### Freshness threshold
 
 Default setup runs on a weekly schedule, so the default `--stale-after` is

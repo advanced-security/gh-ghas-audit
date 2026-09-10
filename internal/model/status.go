@@ -16,9 +16,9 @@ const (
 	ConfigConfigured ConfigurationStatus = "configured"
 	// ConfigNotConfigured means default setup is available but switched off.
 	ConfigNotConfigured ConfigurationStatus = "not-configured"
-	// ConfigAdvancedSetup means default setup is off but CodeQL is running
-	// from a workflow the repository controls. Scanning is happening; this
-	// tool does not yet evaluate its health.
+	// ConfigAdvancedSetup means default setup is off and CodeQL uses a
+	// repository-managed workflow or is inferred from analyses. Health is
+	// evaluated from the selected workflows and analyses.
 	ConfigAdvancedSetup ConfigurationStatus = "advanced-setup"
 	// ConfigAttaching means a security configuration is still being applied.
 	ConfigAttaching ConfigurationStatus = "attaching"

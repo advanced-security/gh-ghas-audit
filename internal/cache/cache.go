@@ -163,7 +163,7 @@ func (s *Store) Clear() error {
 		return err
 	}
 	for _, item := range entries {
-		if item.IsDir() || filepath.Ext(item.Name()) != ".json" {
+		if !isCacheEntry(item) {
 			continue
 		}
 		if err := os.Remove(filepath.Join(s.dir, item.Name())); err != nil {
@@ -191,7 +191,7 @@ func (s *Store) Prune() error {
 
 	cutoff := time.Now().Add(-s.maxAge)
 	for _, item := range entries {
-		if item.IsDir() || filepath.Ext(item.Name()) != ".json" {
+		if !isCacheEntry(item) {
 			continue
 		}
 		info, err := item.Info()
@@ -203,6 +203,21 @@ func (s *Store) Prune() error {
 		}
 	}
 	return nil
+}
+
+// isCacheEntry recognizes only regular files with the names produced by path.
+func isCacheEntry(item os.DirEntry) bool {
+	name := item.Name()
+	const hashLength = sha256.Size * 2
+	if !item.Type().IsRegular() || len(name) != hashLength+len(".json") || name[hashLength:] != ".json" {
+		return false
+	}
+	for _, digit := range name[:hashLength] {
+		if !(digit >= '0' && digit <= '9') && !(digit >= 'a' && digit <= 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // Enabled reports whether the cache is active.

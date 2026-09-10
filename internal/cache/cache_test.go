@@ -1,7 +1,10 @@
 package cache
 
 import (
+	"errors"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -88,6 +91,115 @@ func TestClearRemovesEntries(t *testing.T) {
 	reopened := New(Options{Dir: dir, SchemaKey: "v1"})
 	if _, _, _, ok := reopened.Get("https://api.github.com/thing"); ok {
 		t.Fatal("Clear must remove entries from disk as well as memory")
+	}
+}
+
+func TestCleanupPreservesUnrelatedFiles(t *testing.T) {
+	for _, operation := range []string{"clear", "prune"} {
+		t.Run(operation, func(t *testing.T) {
+			dir := t.TempDir()
+			store := New(Options{Dir: dir, SchemaKey: "v1", MaxAge: time.Hour})
+			old := time.Now().Add(-2 * time.Hour)
+			preserved := []string{
+				"package.json",
+				"report.json",
+				strings.Repeat("a", 63) + ".json",
+				strings.Repeat("a", 65) + ".json",
+				strings.Repeat("a", 63) + "g.json",
+				strings.Repeat("B", 64) + ".json",
+				strings.Repeat("c", 64) + ".JSON",
+				strings.Repeat("a", 64) + ".json.bak",
+				"entry-unfinished.tmp",
+			}
+			for _, name := range preserved {
+				path := filepath.Join(dir, name)
+				if err := os.WriteFile(path, []byte(`{"keep":true}`), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chtimes(path, old, old); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			for _, name := range []string{"data.json", strings.Repeat("a", 64) + ".json"} {
+				path := filepath.Join(dir, name)
+				if err := os.Mkdir(path, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chtimes(path, old, old); err != nil {
+					t.Fatal(err)
+				}
+				preserved = append(preserved, name)
+			}
+
+			store.Put("stale", `"etag"`, []byte(`{"stale":true}`), "")
+			store.Put("fresh", `"etag"`, []byte(`{"fresh":true}`), "")
+			if err := store.Save(); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chtimes(store.path("stale"), old, old); err != nil {
+				t.Fatal(err)
+			}
+
+			var err error
+			if operation == "clear" {
+				err = store.Clear()
+			} else {
+				err = store.Prune()
+			}
+			if err != nil {
+				t.Fatalf("%s returned an error: %v", operation, err)
+			}
+			for _, name := range preserved {
+				if _, err := os.Lstat(filepath.Join(dir, name)); err != nil {
+					t.Errorf("%s must preserve %q: %v", operation, name, err)
+				}
+			}
+			if _, err := os.Stat(store.path("stale")); !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("%s must remove stale cache entries, got %v", operation, err)
+			}
+			_, err = os.Stat(store.path("fresh"))
+			if operation == "prune" && err != nil {
+				t.Errorf("Prune must preserve fresh cache entries: %v", err)
+			}
+			if operation == "clear" && !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("Clear must remove fresh cache entries, got %v", err)
+			}
+		})
+	}
+}
+
+func TestCleanupPreservesSymlinks(t *testing.T) {
+	for _, operation := range []string{"clear", "prune"} {
+		t.Run(operation, func(t *testing.T) {
+			dir := t.TempDir()
+			store := New(Options{Dir: dir, MaxAge: time.Nanosecond})
+			target := filepath.Join(dir, "keep.txt")
+			if err := os.WriteFile(target, []byte("keep"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			link := store.path("symlink")
+			if err := os.Symlink(target, link); err != nil {
+				t.Skipf("symlinks unavailable: %v", err)
+			}
+			time.Sleep(2 * time.Millisecond)
+
+			var err error
+			if operation == "clear" {
+				err = store.Clear()
+			} else {
+				err = store.Prune()
+			}
+			if err != nil {
+				t.Fatalf("%s returned an error: %v", operation, err)
+			}
+			if info, err := os.Lstat(link); err != nil || info.Mode()&os.ModeSymlink == 0 {
+				t.Errorf("%s must preserve cache-named symlinks, got %v, %v", operation, info, err)
+			}
+			if content, err := os.ReadFile(target); err != nil || string(content) != "keep" {
+				t.Errorf("%s must preserve symlink targets, got %q, %v", operation, content, err)
+			}
+		})
 	}
 }
 

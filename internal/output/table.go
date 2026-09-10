@@ -1,6 +1,7 @@
 package output
 
 import (
+	"bufio"
 	"fmt"
 	"io"
 	"sort"
@@ -14,22 +15,22 @@ import (
 
 // severityColor maps a severity onto a terminal colour so that problems are
 // visually obvious in a long list.
-func severityColor(severity model.Severity) *color.Color {
+func severityColor(severity model.Severity, isTerminal bool) *color.Color {
 	switch severity {
 	case model.SeverityFailing:
-		return color.New(color.FgRed, color.Bold)
+		return colorFor(isTerminal, color.FgRed, color.Bold)
 	case model.SeverityStalled:
-		return color.New(color.FgRed)
+		return colorFor(isTerminal, color.FgRed)
 	case model.SeverityStale:
-		return color.New(color.FgYellow, color.Bold)
+		return colorFor(isTerminal, color.FgYellow, color.Bold)
 	case model.SeverityDegraded:
-		return color.New(color.FgYellow)
+		return colorFor(isTerminal, color.FgYellow)
 	case model.SeverityInProgress:
-		return color.New(color.FgBlue)
+		return colorFor(isTerminal, color.FgBlue)
 	case model.SeverityHealthy:
-		return color.New(color.FgGreen)
+		return colorFor(isTerminal, color.FgGreen)
 	default:
-		return color.New(color.FgHiBlack)
+		return colorFor(isTerminal, color.FgHiBlack)
 	}
 }
 
@@ -59,19 +60,25 @@ func colorFor(isTerminal bool, attributes ...color.Attribute) *color.Color {
 
 // WriteTable renders a summary followed by a repository table.
 func WriteTable(writer io.Writer, report *model.Report, opts TableOptions) error {
-	writeSummary(writer, report, opts.IsTerminal)
+	if err := writeSummary(writer, report, opts.IsTerminal); err != nil {
+		return err
+	}
 
 	if len(report.Repositories) == 0 {
-		fmt.Fprintln(writer, "\nNo repositories matched the current scope and filters.")
+		if _, err := fmt.Fprintln(writer, "\nNo repositories matched the current scope and filters."); err != nil {
+			return err
+		}
 		// The footer still has to run. It carries the warnings and the
 		// incomplete-report notice, and without them a scan in which every
 		// organization failed is indistinguishable from one that legitimately
 		// matched nothing.
-		writeFooter(writer, report, opts.IsTerminal)
-		return nil
+		return writeFooter(writer, report, opts.IsTerminal)
 	}
 
-	printer := tableprinter.New(writer, opts.IsTerminal, opts.Width)
+	// The nonterminal printer discards write errors. A buffered writer keeps
+	// the first failure so Flush reports it even when Render does not.
+	buffered := bufio.NewWriter(writer)
+	printer := tableprinter.New(buffered, opts.IsTerminal, opts.Width)
 	headerColor := wrap(colorFor(opts.IsTerminal, color.FgHiWhite, color.Bold))
 
 	// "HEALTH" rather than "STATUS" because the report exposes four distinct
@@ -90,7 +97,7 @@ func WriteTable(writer io.Writer, report *model.Report, opts TableOptions) error
 	printer.EndRow()
 
 	for _, repo := range report.Repositories {
-		statusColor := wrap(severityColor(repo.Status.Overall))
+		statusColor := wrap(severityColor(repo.Status.Overall, opts.IsTerminal))
 		printer.AddField(string(repo.Status.Overall), tableprinter.WithColor(statusColor), tableprinter.WithTruncate(nil))
 		printer.AddField(repo.FullName, tableprinter.WithTruncate(nil))
 		printer.AddField(string(repo.Status.Configuration), tableprinter.WithTruncate(nil))
@@ -110,12 +117,14 @@ func WriteTable(writer io.Writer, report *model.Report, opts TableOptions) error
 	if err := printer.Render(); err != nil {
 		return err
 	}
+	if err := buffered.Flush(); err != nil {
+		return err
+	}
 
-	writeFooter(writer, report, opts.IsTerminal)
-	return nil
+	return writeFooter(writer, report, opts.IsTerminal)
 }
 
-func writeSummary(writer io.Writer, report *model.Report, isTerminal bool) {
+func writeSummary(writer io.Writer, report *model.Report, isTerminal bool) error {
 	bold := colorFor(isTerminal, color.Bold)
 	scope := report.Scope.Repository
 	if scope == "" && report.Scope.Enterprise != "" {
@@ -125,25 +134,37 @@ func writeSummary(writer io.Writer, report *model.Report, isTerminal bool) {
 		scope = strings.Join(report.Scope.Organizations, ", ")
 	}
 
-	fmt.Fprintf(writer, "\n%s\n", bold.Sprintf("Code scanning status: %s", scope))
-	fmt.Fprintf(writer, "%d repositories, %s needing attention. Scans are stale after %s for active repositories",
+	if _, err := fmt.Fprintf(writer, "\n%s\n", bold.Sprintf("Code scanning status: %s", scope)); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(writer, "%d repositories, %s needing attention. Scans are stale after %s for active repositories",
 		report.Summary.TotalRepositories,
 		colorFor(isTerminal, attentionColor(report.Summary.NeedsAttention)).Sprintf("%d", report.Summary.NeedsAttention),
-		report.Settings.StaleAfter)
-	if report.Settings.StaleAfterInactive != "" {
-		fmt.Fprintf(writer, " and %s for inactive ones", report.Settings.StaleAfterInactive)
+		report.Settings.StaleAfter); err != nil {
+		return err
 	}
-	fmt.Fprintln(writer)
+	if report.Settings.StaleAfterInactive != "" {
+		if _, err := fmt.Fprintf(writer, " and %s for inactive ones", report.Settings.StaleAfterInactive); err != nil {
+			return err
+		}
+	}
+	if _, err := fmt.Fprintln(writer); err != nil {
+		return err
+	}
 
-	fmt.Fprintln(writer)
+	if _, err := fmt.Fprintln(writer); err != nil {
+		return err
+	}
 	for _, severity := range model.AllSeverities() {
 		count := report.Summary.BySeverity[string(severity)]
 		if count == 0 {
 			continue
 		}
-		fmt.Fprintf(writer, "  %-16s %s\n",
+		if _, err := fmt.Fprintf(writer, "  %-16s %s\n",
 			string(severity),
-			severityColor(severity).Sprintf("%d", count))
+			severityColor(severity, isTerminal).Sprintf("%d", count)); err != nil {
+			return err
+		}
 	}
 
 	if len(report.Summary.Groups) > 0 {
@@ -157,44 +178,62 @@ func writeSummary(writer io.Writer, report *model.Report, isTerminal bool) {
 		if label == "" {
 			label = "group"
 		}
-		fmt.Fprintf(writer, "\n%s\n", bold.Sprintf("By %s", label))
+		if _, err := fmt.Fprintf(writer, "\n%s\n", bold.Sprintf("By %s", label)); err != nil {
+			return err
+		}
 		groups := report.Summary.Groups
 		if len(groups) > 15 {
 			groups = groups[:15]
 		}
 		for _, group := range groups {
-			fmt.Fprintf(writer, "  %-30s %3d repositories, %s needing attention\n",
+			if _, err := fmt.Fprintf(writer, "  %-30s %3d repositories, %s needing attention\n",
 				truncateLabel(group.Value, 30),
 				group.Repositories,
-				colorFor(isTerminal, attentionColor(group.NeedsAttention)).Sprintf("%d", group.NeedsAttention))
+				colorFor(isTerminal, attentionColor(group.NeedsAttention)).Sprintf("%d", group.NeedsAttention)); err != nil {
+				return err
+			}
 		}
 		if len(report.Summary.Groups) > len(groups) {
-			fmt.Fprintf(writer, "  ... and %d more groups\n", len(report.Summary.Groups)-len(groups))
+			if _, err := fmt.Fprintf(writer, "  ... and %d more groups\n", len(report.Summary.Groups)-len(groups)); err != nil {
+				return err
+			}
 		}
 	}
 
-	fmt.Fprintln(writer)
+	_, err := fmt.Fprintln(writer)
+	return err
 }
 
-func writeFooter(writer io.Writer, report *model.Report, isTerminal bool) {
+func writeFooter(writer io.Writer, report *model.Report, isTerminal bool) error {
 	if len(report.Warnings) > 0 {
-		fmt.Fprintf(writer, "\n%s\n", colorFor(isTerminal, color.FgYellow, color.Bold).Sprint("Warnings"))
+		if _, err := fmt.Fprintf(writer, "\n%s\n", colorFor(isTerminal, color.FgYellow, color.Bold).Sprint("Warnings")); err != nil {
+			return err
+		}
 		for _, warning := range report.Warnings {
-			fmt.Fprintf(writer, "  - %s\n", warning)
+			if _, err := fmt.Fprintf(writer, "  - %s\n", warning); err != nil {
+				return err
+			}
 		}
 	}
 
 	if report.Stats.Incomplete {
-		fmt.Fprintf(writer, "\n%s\n", colorFor(isTerminal, color.FgYellow).Sprint(
-			"This report is incomplete. Absence of a problem here does not prove absence of a problem."))
+		if _, err := fmt.Fprintf(writer, "\n%s\n", colorFor(isTerminal, color.FgYellow).Sprint(
+			"This report is incomplete. Absence of a problem here does not prove absence of a problem.")); err != nil {
+			return err
+		}
 	}
 
-	fmt.Fprintf(writer, "\n%d API requests, %d cached, %d GraphQL queries in %.1fs",
-		report.Stats.APIRequests, report.Stats.CacheHits, report.Stats.GraphQLRequests, report.Stats.DurationSeconds)
-	if report.Stats.RateLimitRemains > 0 {
-		fmt.Fprintf(writer, ", %d rate limit remaining", report.Stats.RateLimitRemains)
+	if _, err := fmt.Fprintf(writer, "\n%d API requests, %d cached, %d GraphQL queries in %.1fs",
+		report.Stats.APIRequests, report.Stats.CacheHits, report.Stats.GraphQLRequests, report.Stats.DurationSeconds); err != nil {
+		return err
 	}
-	fmt.Fprintln(writer)
+	if report.Stats.RateLimitRemains > 0 {
+		if _, err := fmt.Fprintf(writer, ", %d rate limit remaining", report.Stats.RateLimitRemains); err != nil {
+			return err
+		}
+	}
+	_, err := fmt.Fprintln(writer)
+	return err
 }
 
 func attentionColor(count int) color.Attribute {

@@ -662,6 +662,9 @@ func parsePropertyFilters(values []string) (map[string][]string, error) {
 			return nil, fmt.Errorf("invalid --property-filter %q; expected NAME=VALUE", value)
 		}
 		patterns := splitList(wanted)
+		if len(patterns) == 0 {
+			return nil, fmt.Errorf("invalid --property-filter %q; VALUE must not be empty", value)
+		}
 		if err := validateGlobs(patterns, "--property-filter"); err != nil {
 			return nil, err
 		}

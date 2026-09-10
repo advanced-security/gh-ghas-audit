@@ -18,6 +18,8 @@ func TestInvalidScopeFiltersFailBeforeCollection(t *testing.T) {
 		{"--exclude", "service-["},
 		{"--property-filter", "Project=["},
 		{"--property-filter", "Project=service-["},
+		{"--property-filter", "Project="},
+		{"--property-filter", "Project= "},
 	} {
 		t.Run(test.flag+"/"+test.value, func(t *testing.T) {
 			root := newRootCommand()
@@ -56,8 +58,11 @@ func TestParsePropertyFiltersValidatesEveryValue(t *testing.T) {
 		{"Project=["},
 		{"Project=service-*,["},
 		{"Project=service-*", "Project=["},
+		{"Project="},
+		{"Project= , "},
+		{"Project=service-*", "Project="},
 	} {
-		if _, err := parsePropertyFilters(values); err == nil || !strings.Contains(err.Error(), "invalid --property-filter pattern") {
+		if _, err := parsePropertyFilters(values); err == nil || !strings.Contains(err.Error(), "invalid --property-filter") {
 			t.Errorf("parsePropertyFilters(%q) must reject malformed patterns, got %v", values, err)
 		}
 	}

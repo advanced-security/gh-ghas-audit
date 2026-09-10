@@ -143,6 +143,8 @@ JSON is the canonical report. `schema_version` versions the data contract indepe
 
 Repository CSV includes the four dimensions, language lists, run links, configuration, diagnostics, reasons and errors. Language CSV includes per-language analysis evidence and errors. Both include `Evidence complete`; custom properties add `Property: NAME` columns.
 
+At config depth, language CSV leaves `Analyzed` and `Succeeded` blank because runtime evidence was not collected.
+
 | Exit | Meaning |
 | --- | --- |
 | `0` | Collection completed; no `--fail-on` match |

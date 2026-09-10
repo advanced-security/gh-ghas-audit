@@ -582,12 +582,6 @@ func (c *Collector) freshness(repo *model.Repo) model.FreshnessStatus {
 	days := int(age.Hours() / 24)
 	repo.StaleDays = &days
 
-	// A threshold of zero disables staleness for this class of repository,
-	// which is what an organization wants when it has not enabled monthly
-	// scanning of inactive repositories.
-	if threshold <= 0 {
-		return model.FreshCurrent
-	}
 	if age > threshold {
 		return model.FreshStale
 	}
@@ -624,10 +618,7 @@ func (c *Collector) classifyActivity(repo *model.Repo) {
 // staleThreshold returns the freshness threshold for a repository and a label
 // explaining which one was applied.
 func (c *Collector) staleThreshold(repo *model.Repo) (time.Duration, string) {
-	if repo.Activity == model.ActivityInactive {
-		if c.options.StaleAfterInactive <= 0 {
-			return 0, "not checked (inactive)"
-		}
+	if repo.Activity == model.ActivityInactive && c.options.StaleAfterInactive > 0 {
 		return c.options.StaleAfterInactive, formatDuration(c.options.StaleAfterInactive) + " (inactive)"
 	}
 	return c.options.StaleAfter, formatDuration(c.options.StaleAfter)
@@ -728,6 +719,13 @@ func apiDiagnostics(repo *model.Repo) []model.Diagnostic {
 	return diagnostics
 }
 
+// hasWarningDiagnostic reports whether any diagnostic is severe enough to
+// change a repository's verdict.
+//
+// Informational findings are deliberately excluded. GitHub's tool status page
+// shows conditions such as private package registry use as suggestions while
+// still reporting the configuration as working as expected, and this report
+// must not contradict it.
 func hasWarningDiagnostic(diagnostics []model.Diagnostic) bool {
 	for _, diagnostic := range diagnostics {
 		if diagnostic.Severity == "warning" || diagnostic.Severity == "error" {

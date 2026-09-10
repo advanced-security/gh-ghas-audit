@@ -161,7 +161,7 @@ Narrowing:
 | `--property-filter` | Only repositories whose custom property matches, as `NAME=VALUE`. |
 | `--activity` | Only `active` or `inactive` repositories. |
 | `--stale-after` | Freshness threshold for active repositories, default `8d`. |
-| `--stale-after-inactive` | Freshness threshold for inactive repositories, default `32d`. Use `off` to skip. |
+| `--stale-after-inactive` | Freshness threshold for inactive repositories, default `32d`. |
 | `--inactive-after` | Time without a push that makes a repository inactive, default `180d`. |
 
 `--match`, `--exclude`, `--visibility` and `--property-filter` are applied
@@ -207,22 +207,19 @@ gh ghas-audit code-scanning status -o my-org --activity inactive --status stale
 ```
 
 If your organization has **not** enabled monthly scanning of inactive
-repositories, those repositories stop being scanned altogether and would be
-reported stale indefinitely. Turn the check off for them:
-
-```bash
-gh ghas-audit code-scanning status -o my-org --stale-after-inactive off
-```
-
-Use `--inactive-after off` to disable the distinction entirely and hold every
-repository to `--stale-after`.
+repositories, those repositories stop being scanned altogether and will be
+reported stale. That is the correct result: an unscanned repository is
+unscanned regardless of why, and the remedy is either to enable the setting or
+to archive the repository. Archived repositories are excluded with
+`--skip-archived`.
 
 Two caveats worth knowing. Activity is inferred from the repository push
 timestamp, which is the closest public signal to GitHub's own "no pushes or
 pull requests" rule; they agree in practice, because opening a pull request
 requires pushing a branch, but this is an approximation. And the organization
 setting itself is not exposed by any API, so the tool cannot detect whether
-monthly scanning is switched on: `--stale-after-inactive` is how you tell it.
+monthly scanning is switched on; `--stale-after-inactive` is simply the
+threshold it applies.
 
 ### Grouping by application
 
@@ -405,12 +402,35 @@ Understand the trade-offs before enabling it:
   `--deep-diagnostics-max-mb` (default 32) cap the work. When a limit is
   reached, inspection stops rather than running unbounded.
 
-Only genuine Actions annotations are considered. Analysis logs contain large
-configuration dumps and query traces that mention words such as "warning",
-"dependency" and "analysis quality" during entirely healthy runs, so scanning
-raw log text produces false positives. Recognized problems get a stable code;
-anything unrecognized is reported verbatim rather than guessed at. Routine
-noise, such as action and Node.js deprecation notices, is filtered out.
+Only genuine CodeQL diagnostics and Actions annotations are considered.
+
+The most useful signal is the diagnostic blocks CodeQL writes to the log, which
+are the same entries the repository tool status page displays:
+
+```text
+##[group]Low C# analysis quality (1 result)
+* Scanning C# code completed successfully, but the scan encountered issues ...
+##[endgroup]
+```
+
+Parsing those reproduces the status page rather than guessing from log text,
+including the metrics and thresholds it quotes. Severity follows how GitHub
+presents each entry, so the report agrees with the page:
+
+| Status page | Reported as | Effect on status |
+| --- | --- | --- |
+| Error, for example a failed build | `error` | Repository is failing or degraded |
+| Warning, for example low analysis quality or duplicate classes filtered out | `warning` | Repository is degraded |
+| Suggestion, for example build-mode `none` or private package registries | `info` | No effect |
+
+Anything unrecognized is recorded as `info` with its original text, so a new
+diagnostic is surfaced without turning a repository red on its own. Routine
+noise, such as action and Node.js deprecation notices, is filtered out, and
+analysis logs mention words like "warning" and "analysis quality" during
+entirely healthy runs, which is why raw text matching is not used.
+
+Verified against three repositories whose status pages are green, amber and
+red: they are reported as healthy, degraded and failing respectively.
 
 ## Known limitations
 
@@ -418,9 +438,12 @@ These are limits of the public GitHub API, not of this tool. They are stated
 plainly so the report is not mistaken for something it cannot be.
 
 - **No exact parity with the repository tool status page.** GitHub does not
-  expose that page's warnings through REST or GraphQL. This tool reconstructs
-  health from configuration, run, job and CodeQL database evidence, and can
-  optionally recover warning text from logs, but the two will not always agree.
+  expose that page through REST or GraphQL; several candidate endpoints return
+  404. With `--deep-diagnostics` the tool reconstructs most of it by parsing
+  the CodeQL diagnostic blocks in the Actions log, which is the same content
+  the page renders, but that depends on log format and log retention rather
+  than a supported interface. Without that flag, status is derived from
+  configuration, run, job and CodeQL database evidence only.
 - **Coverage is inferred, not declared.** Whether a language was analyzed is
   derived from per-language jobs and CodeQL databases. A language configured in
   default setup with no successful analysis is reported as not analyzed.

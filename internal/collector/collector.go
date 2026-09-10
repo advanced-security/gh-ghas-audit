@@ -76,10 +76,7 @@ type Options struct {
 	// repository is reported as stale.
 	StaleAfter time.Duration
 	// StaleAfterInactive is the equivalent threshold for repositories GitHub
-	// scans monthly because they have had no pushes for a long time. Zero
-	// disables staleness checking for those repositories, which suits an
-	// organization that has not enabled monthly scanning of inactive
-	// repositories.
+	// scans monthly because they have had no pushes for a long time.
 	StaleAfterInactive time.Duration
 	// InactiveAfter is how long without a push makes a repository inactive.
 	// Zero treats every repository as active.
@@ -198,8 +195,8 @@ func (c *Collector) Collect(ctx context.Context, toolVersion string) (*model.Rep
 		Settings: model.Settings{
 			StaleAfter:            formatDuration(c.options.StaleAfter),
 			StaleAfterSeconds:     c.options.StaleAfter.Seconds(),
-			StaleAfterInactive:    describeInactiveThreshold(c.options.StaleAfterInactive),
-			InactiveAfter:         describeInactiveWindow(c.options.InactiveAfter),
+			StaleAfterInactive:    formatDuration(c.options.StaleAfterInactive),
+			InactiveAfter:         formatDuration(c.options.InactiveAfter),
 			SkipArchived:          c.options.SkipArchived,
 			SkipForks:             c.options.SkipForks,
 			SecurityConfiguration: c.options.SecurityConfiguration,
@@ -628,24 +625,11 @@ func splitRepository(value string) (string, string, bool) {
 // formatDuration renders a duration using day granularity where possible,
 // matching the way the flag is supplied.
 func formatDuration(duration time.Duration) string {
+	if duration <= 0 {
+		return ""
+	}
 	if duration%(24*time.Hour) == 0 {
 		return fmt.Sprintf("%dd", int(duration.Hours()/24))
 	}
 	return duration.String()
-}
-
-// describeInactiveThreshold renders the inactive staleness setting, making an
-// explicitly disabled check visible in the report rather than implied.
-func describeInactiveThreshold(duration time.Duration) string {
-	if duration <= 0 {
-		return "off"
-	}
-	return formatDuration(duration)
-}
-
-func describeInactiveWindow(duration time.Duration) string {
-	if duration <= 0 {
-		return "off"
-	}
-	return formatDuration(duration)
 }

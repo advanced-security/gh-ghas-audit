@@ -115,9 +115,9 @@ func init() {
 	flags.StringVar(&statusOpts.staleAfter, "stale-after", "8d",
 		"Age after which an active repository's scan is stale (default setup scans weekly, so this allows a one day buffer)")
 	flags.StringVar(&statusOpts.staleAfterInactive, "stale-after-inactive", "32d",
-		"Age after which an inactive repository's scan is stale. GitHub scans repositories with no recent pushes every 30 days. Use 'off' to skip the check")
+		"Age after which an inactive repository's scan is stale. GitHub scans repositories with no recent pushes every 30 days")
 	flags.StringVar(&statusOpts.inactiveAfter, "inactive-after", "180d",
-		"Time without a push after which a repository counts as inactive and uses the monthly threshold. Use 'off' to treat every repository as active")
+		"Time without a push after which a repository counts as inactive and uses the monthly threshold")
 	flags.StringSliceVar(&statusOpts.activityFilter, "activity", nil,
 		"Only report repositories with this activity: active or inactive")
 
@@ -183,11 +183,11 @@ func runCodeScanningStatus(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return fmt.Errorf("invalid --stale-after: %w", err)
 	}
-	staleAfterInactive, err := parseOptionalDuration(statusOpts.staleAfterInactive)
+	staleAfterInactive, err := parseDuration(statusOpts.staleAfterInactive)
 	if err != nil {
 		return fmt.Errorf("invalid --stale-after-inactive: %w", err)
 	}
-	inactiveAfter, err := parseOptionalDuration(statusOpts.inactiveAfter)
+	inactiveAfter, err := parseDuration(statusOpts.inactiveAfter)
 	if err != nil {
 		return fmt.Errorf("invalid --inactive-after: %w", err)
 	}
@@ -408,15 +408,6 @@ func parseActivities(values []string) ([]model.Activity, error) {
 		}
 	}
 	return activities, nil
-}
-
-// parseOptionalDuration parses a duration that can be switched off entirely.
-func parseOptionalDuration(value string) (time.Duration, error) {
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "", "off", "none", "never", "0":
-		return 0, nil
-	}
-	return parseDuration(value)
 }
 
 func repoHasLanguage(repo model.Repo, wanted map[model.Language]bool) bool {

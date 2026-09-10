@@ -112,12 +112,10 @@ func writeSummary(writer io.Writer, report *model.Report) {
 		report.Summary.TotalRepositories,
 		color.New(attentionColor(report.Summary.NeedsAttention)).Sprintf("%d", report.Summary.NeedsAttention),
 		report.Settings.StaleAfter)
-	switch report.Settings.StaleAfterInactive {
-	case "", "off":
-		fmt.Fprintln(writer, "; inactive repositories are not checked")
-	default:
-		fmt.Fprintf(writer, " and %s for inactive ones\n", report.Settings.StaleAfterInactive)
+	if report.Settings.StaleAfterInactive != "" {
+		fmt.Fprintf(writer, " and %s for inactive ones", report.Settings.StaleAfterInactive)
 	}
+	fmt.Fprintln(writer)
 
 	fmt.Fprintln(writer)
 	for _, severity := range model.AllSeverities() {

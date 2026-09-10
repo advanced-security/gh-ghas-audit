@@ -38,19 +38,81 @@ import (
 const (
 	defaultMaxRepositories = 200
 	defaultMaxBytes        = 32 << 20 // 32 MiB of compressed logs per run
-	defaultMaxExcerpt      = 300
-	maxDiagnosticsPerRun   = 25
-	maxLineLength          = 16000
+	// Error text is the whole point of this mode, and CodeQL failure messages
+	// quote a command line before the useful explanation, so the excerpt has
+	// to be long enough to reach it.
+	defaultMaxExcerpt    = 600
+	maxDiagnosticsPerRun = 25
+	maxLineLength        = 16000
 )
 
 const (
-	genericWarningCode = "analysis-warning"
-	genericErrorCode   = "analysis-error"
+	genericInfoCode  = "analysis-note"
+	genericErrorCode = "analysis-error"
+)
+
+// Diagnostic severities. Only "error" and "warning" influence a repository's
+// status. "info" records something worth knowing that GitHub itself does not
+// treat as a problem.
+const (
+	severityInfo    = "info"
+	severityWarning = "warning"
+	severityError   = "error"
 )
 
 // annotationPattern matches the Actions annotation markers that become
 // warnings and errors in the run summary.
 var annotationPattern = regexp.MustCompile(`##\[(warning|error)\](.*)$`)
+
+// diagnosticGroupPattern matches the log block CodeQL emits for each
+// diagnostic it reports, for example:
+//
+//	##[group]Low C# analysis quality (1 result)
+//	* Scanning C# code completed successfully, but the scan encountered ...
+//	##[endgroup]
+//
+// These blocks are the source of the repository tool status page entries, so
+// parsing them reproduces that page rather than guessing from warning text.
+// The trailing result count distinguishes them from ordinary log grouping.
+var diagnosticGroupPattern = regexp.MustCompile(`##\[group\](.+?) \(\d+ results?\)\s*$`)
+
+// groupSeverity maps a CodeQL diagnostic title to a severity matching how the
+// tool status page presents it: a warning triangle or a suggestion lightbulb.
+//
+// Titles are stable diagnostic names, which makes them a far more reliable key
+// than free-form log text.
+var groupSeverity = []struct {
+	matcher  *regexp.Regexp
+	severity string
+	code     string
+}{
+	{
+		matcher:  regexp.MustCompile(`(?i)^low .*analysis quality`),
+		severity: severityWarning,
+		code:     "low-quality-scan",
+	},
+	{
+		matcher:  regexp.MustCompile(`(?i)duplicate classes filtered out`),
+		severity: severityWarning,
+		code:     "duplicate-classes",
+	},
+	{
+		matcher:  regexp.MustCompile(`(?i)(could not|unable to|fail\w*|error)`),
+		severity: severityWarning,
+		code:     "analysis-problem",
+	},
+	{
+		matcher:  regexp.MustCompile(`(?i)extracted with build-mode set to`),
+		severity: severityInfo,
+		code:     "build-mode-none",
+	},
+	{
+		matcher: regexp.MustCompile(`(?i)(used build tool|dependency graph information|system default jdk|` +
+			`build-mode .* completed|classpath entries were inferred|private package registr)`),
+		severity: severityInfo,
+		code:     "extraction-note",
+	},
+}
 
 // noisePatterns are annotations that say nothing about code scanning health.
 // They appear on virtually every run and would otherwise mark healthy
@@ -67,23 +129,33 @@ var noisePatterns = []*regexp.Regexp{
 
 // pattern describes a recognized annotation worth naming explicitly.
 type pattern struct {
-	code    string
-	matcher *regexp.Regexp
-	summary string
+	code     string
+	severity string
+	matcher  *regexp.Regexp
+	summary  string
 }
 
 // knownPatterns name the problems customers report having to find by reading
-// logs by hand. Annotations matching none of these are still reported, but
-// under a generic code carrying their original text rather than an invented
-// interpretation.
+// logs by hand.
+//
+// Severity here must agree with the repository tool status page. GitHub shows
+// several conditions as suggestions rather than problems, for example private
+// package registry use and build-mode "none", while still reporting the
+// configuration as working as expected. Those are recorded as informational so
+// the report never contradicts a green tool status page.
 var knownPatterns = []pattern{
 	{
-		code:    "low-quality-scan",
-		matcher: regexp.MustCompile(`(?i)(low[- ](\w+ )?analysis quality|quality of.{0,30}analysis|scan.{0,20}may be incomplete)`),
+		code:     "low-quality-scan",
+		severity: severityWarning,
+		// Covers both the CodeQL diagnostic title ("Low Java analysis
+		// quality") and the plainer phrasing customers quote.
+		matcher: regexp.MustCompile(`(?i)(low[- ]quality|low[- ](\w+ )?analysis quality|` +
+			`quality of.{0,30}analysis|scan.{0,20}may be incomplete)`),
 		summary: "CodeQL reported reduced analysis quality for this language",
 	},
 	{
-		code: "dependency-extraction-failed",
+		code:     "dependency-extraction-failed",
+		severity: severityWarning,
 		// Wording varies by ecosystem and CodeQL version. These are the forms
 		// reported in customer feedback, such as "failed to extract dependency
 		// information from build tool Gradle".
@@ -94,34 +166,67 @@ var knownPatterns = []pattern{
 		summary: "CodeQL could not resolve project dependencies, which reduces analysis quality",
 	},
 	{
-		code:    "build-failed",
-		matcher: regexp.MustCompile(`(?i)(autobuild (failed|did not)|we were unable to automatically build|build (command )?failed)`),
-		summary: "the automatic build step failed",
+		code:     "build-failed",
+		severity: severityError,
+		matcher:  regexp.MustCompile(`(?i)(autobuild (failed|did not)|we were unable to automatically build|build (command )?failed)`),
+		summary:  "the automatic build step failed",
 	},
 	{
-		code:    "no-code-found",
-		matcher: regexp.MustCompile(`(?i)(no (source )?code (was )?(found|seen)|did not (see|find) any code|no supported (source )?code)`),
-		summary: "CodeQL found no analyzable code for a configured language",
+		code:     "no-code-found",
+		severity: severityWarning,
+		matcher:  regexp.MustCompile(`(?i)(no (source )?code (was )?(found|seen)|did not (see|find) any code|no supported (source )?code)`),
+		summary:  "CodeQL found no analyzable code for a configured language",
 	},
 	{
-		code:    "language-auto-deselected",
-		matcher: regexp.MustCompile(`(?i)(auto[- ]?deselect|disabling (the )?language|language.{0,20}was (disabled|removed))`),
-		summary: "a language was automatically deselected from default setup",
+		code:     "language-auto-deselected",
+		severity: severityWarning,
+		matcher:  regexp.MustCompile(`(?i)(auto[- ]?deselect|disabling (the )?language|language.{0,20}was (disabled|removed))`),
+		summary:  "a language was automatically deselected from default setup",
 	},
 	{
-		code:    "missing-api-hints",
-		matcher: regexp.MustCompile(`(?i)(may not understand some (apis|libraries)|uncommon modules)`),
-		summary: "CodeQL reported it may not understand some APIs used by this project",
+		code:     "database-finalize-failed",
+		severity: severityError,
+		// The message customers quote when asking "what does this exit code
+		// mean". The explanation follows the command line, which is why
+		// excerpts need to be long.
+		matcher: regexp.MustCompile(`(?i)(fatal error while running.{0,120}database (finalize|create)|` +
+			`database finalize.{0,40}exit code|finalize-dataset.{0,60}(error|failed))`),
+		summary: "CodeQL failed while finalizing the database for this language",
 	},
 	{
-		code:    "runner-unavailable",
-		matcher: regexp.MustCompile(`(?i)(no runner (matching|available)|waiting for a runner.{0,40}(timed out|expired))`),
-		summary: "no self-hosted runner matched the configured labels",
+		code:     "workflow-file-missing",
+		severity: severityWarning,
+		matcher: regexp.MustCompile(`(?i)(unable to validate code scanning workflow|` +
+			`expected to find a code scanning workflow file at)`),
+		summary: "the managed code scanning workflow file could not be validated",
 	},
 	{
-		code:    "registry-unreachable",
-		matcher: regexp.MustCompile(`(?i)(connection test to .{0,80}failed|proxy.{0,30}(failed|unreachable)|could not connect to .{0,40}registry)`),
-		summary: "CodeQL could not reach a configured package registry or proxy",
+		code:     "runner-unavailable",
+		severity: severityError,
+		matcher:  regexp.MustCompile(`(?i)(no runner (matching|available)|waiting for a runner.{0,40}(timed out|expired))`),
+		summary:  "no self-hosted runner matched the configured labels",
+	},
+	{
+		// The tool status page lists this as a suggestion alongside "this
+		// configuration is working as expected", so it must not change the
+		// verdict.
+		code:     "private-registries",
+		severity: severityInfo,
+		matcher:  regexp.MustCompile(`(?i)(private package registr|connection test to .{0,80}failed|proxy.{0,30}(failed|unreachable)|could not connect to .{0,40}registry)`),
+		summary:  "extraction used private package registries",
+	},
+	{
+		// Also shown as a suggestion on the tool status page.
+		code:     "build-mode-none",
+		severity: severityInfo,
+		matcher:  regexp.MustCompile(`(?i)build[- ]mode.{0,20}none`),
+		summary:  "the language was extracted with build-mode set to none",
+	},
+	{
+		code:     "missing-api-hints",
+		severity: severityInfo,
+		matcher:  regexp.MustCompile(`(?i)(may not understand some (apis|libraries)|uncommon modules)`),
+		summary:  "CodeQL reported it may not understand some APIs used by this project",
 	},
 }
 
@@ -252,20 +357,72 @@ func scanStream(
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 0, 64*1024), maxLineLength)
 
+	// State for an open CodeQL diagnostic block.
+	var groupTitle string
+	var groupBody []string
+
+	closeGroup := func() {
+		if groupTitle == "" {
+			return
+		}
+		code, severity := classifyGroup(groupTitle)
+		body := strings.TrimSpace(strings.Join(groupBody, " "))
+		if body == "" {
+			body = groupTitle
+		}
+
+		key := string(language) + "|group|" + groupTitle
+		if !seen[key] {
+			seen[key] = true
+			diagnostics = append(diagnostics, model.Diagnostic{
+				Source:   model.SourceLog,
+				Severity: severity,
+				Code:     code,
+				Language: language,
+				// The title is the same heading the tool status page shows.
+				Message: groupTitle,
+				Excerpt: truncate(body, maxExcerpt),
+				URL:     runURL,
+			})
+		}
+		groupTitle = ""
+		groupBody = nil
+	}
+
 	for scanner.Scan() {
 		if already+len(diagnostics) >= maxDiagnosticsPerRun {
 			break
 		}
+		line := scanner.Text()
 
-		severity, message, ok := parseAnnotation(scanner.Text())
+		// CodeQL diagnostic blocks carry the tool status page content, so they
+		// are preferred over free-form annotation text.
+		if match := diagnosticGroupPattern.FindStringSubmatch(line); match != nil {
+			closeGroup()
+			groupTitle = strings.TrimSpace(match[1])
+			continue
+		}
+		if groupTitle != "" {
+			if strings.Contains(line, "##[endgroup]") {
+				closeGroup()
+				continue
+			}
+			// Diagnostic bodies are emitted as bullet lines.
+			if trimmed := strings.TrimSpace(stripTimestamp(line)); strings.HasPrefix(trimmed, "* ") {
+				groupBody = append(groupBody, strings.TrimSpace(strings.TrimPrefix(trimmed, "* ")))
+			}
+			continue
+		}
+
+		severityFromMarker, message, ok := parseAnnotation(line)
 		if !ok || isNoise(message) {
 			continue
 		}
 
-		code, summary := classifyAnnotation(message, severity)
+		code, summary, severity := classifyAnnotation(message, severityFromMarker)
 
 		key := string(language) + "|" + code + "|" + summary
-		if code == genericWarningCode || code == genericErrorCode {
+		if code == genericInfoCode || code == genericErrorCode {
 			// Unrecognized annotations are keyed on their own text so that
 			// two different problems are not collapsed into one entry.
 			key = string(language) + "|" + code + "|" + message
@@ -285,8 +442,34 @@ func scanStream(
 			URL:      runURL,
 		})
 	}
+	closeGroup()
 
 	return diagnostics
+}
+
+// classifyGroup assigns a code and severity to a CodeQL diagnostic title.
+// Unrecognized titles are informational, so a new diagnostic never turns a
+// repository red on its own.
+func classifyGroup(title string) (string, string) {
+	for _, rule := range groupSeverity {
+		if rule.matcher.MatchString(title) {
+			return rule.code, rule.severity
+		}
+	}
+	return "analysis-note", severityInfo
+}
+
+// stripTimestamp removes the leading timestamp Actions prefixes onto every log
+// line, so excerpts read cleanly.
+func stripTimestamp(line string) string {
+	trimmed := strings.TrimLeft(line, " \t")
+	if len(trimmed) < 20 || trimmed[4] != '-' || trimmed[7] != '-' {
+		return trimmed
+	}
+	if space := strings.IndexByte(trimmed, ' '); space > 0 && space < 32 {
+		return strings.TrimSpace(trimmed[space+1:])
+	}
+	return trimmed
 }
 
 // parseAnnotation extracts the severity and text of an Actions annotation.
@@ -311,18 +494,23 @@ func isNoise(message string) bool {
 	return false
 }
 
-// classifyAnnotation names a recognized problem, or falls back to reporting
-// the annotation verbatim rather than guessing at its meaning.
-func classifyAnnotation(message, severity string) (string, string) {
+// classifyAnnotation names a recognized problem and its severity, or falls
+// back to reporting the annotation verbatim.
+//
+// An unrecognized annotation is recorded as informational rather than as a
+// warning. An Actions warning is not the same thing as a code scanning
+// problem, and treating it as one would report repositories as degraded whose
+// tool status page says they are working as expected.
+func classifyAnnotation(message, marker string) (string, string, string) {
 	for _, candidate := range knownPatterns {
 		if candidate.matcher.MatchString(message) {
-			return candidate.code, candidate.summary
+			return candidate.code, candidate.summary, candidate.severity
 		}
 	}
-	if severity == "error" {
-		return genericErrorCode, "the analysis run reported an error"
+	if marker == severityError {
+		return genericErrorCode, "the analysis run reported an error", severityInfo
 	}
-	return genericWarningCode, "the analysis run reported a warning"
+	return genericInfoCode, "the analysis run reported a message", severityInfo
 }
 
 // languageFromLogPath recovers the analyzed language from an Actions log entry

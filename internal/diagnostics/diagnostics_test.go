@@ -92,10 +92,8 @@ func TestKnownProblemsAreNamed(t *testing.T) {
 	}{
 		{"Java analysis failed to extract a dependency graph from gradle", "dependency-extraction-failed"},
 		{"failed to extract dependency information from build tool Gradle", "dependency-extraction-failed"},
-		{"java analysis may not understand some apis defined in uncommon modules", "missing-api-hints"},
 		{"We were unable to automatically build your code", "build-failed"},
 		{"No source code was seen during the build", "no-code-found"},
-		{"Connection test to https://my.com/a failed: socket hang up", "registry-unreachable"},
 	}
 
 	for _, test := range cases {
@@ -118,10 +116,41 @@ func TestKnownProblemsAreNamed(t *testing.T) {
 	}
 }
 
-// An unrecognized annotation is still worth reporting, because the customer
-// asked for the error description. It must be reported verbatim under a
-// generic code rather than given an invented meaning.
-func TestUnrecognizedAnnotationsAreReportedVerbatim(t *testing.T) {
+// GitHub's tool status page reports private package registry use and
+// build-mode "none" as suggestions while still saying the configuration is
+// working as expected. Escalating them would make this report contradict the
+// page it is meant to summarize.
+func TestSuggestionsAreInformationalAndDoNotChangeTheVerdict(t *testing.T) {
+	cases := []struct {
+		line string
+		code string
+	}{
+		{"Connection test to https://my.com/a failed: socket hang up", "private-registries"},
+		{"Java extraction used private package registries", "private-registries"},
+		{"Java was extracted with build-mode set to 'none'", "build-mode-none"},
+		{"java analysis may not understand some apis defined in uncommon modules", "missing-api-hints"},
+	}
+
+	for _, test := range cases {
+		found := scanArchive(t, map[string]string{
+			"0_Analyze (java-kotlin).txt": "2026-09-05T14:34:17Z ##[warning]" + test.line + "\n",
+		})
+		if len(found) != 1 {
+			t.Errorf("Scan(%q) returned %d diagnostics, want 1", test.line, len(found))
+			continue
+		}
+		if found[0].Code != test.code {
+			t.Errorf("Scan(%q) code = %q, want %q", test.line, found[0].Code, test.code)
+		}
+		if found[0].Severity != severityInfo {
+			t.Errorf("Scan(%q) severity = %q, want info so a green tool status page is not contradicted",
+				test.line, found[0].Severity)
+		}
+	}
+}
+
+// An unrecognized Actions warning is not evidence of a code scanning problem.
+func TestUnrecognizedAnnotationsAreInformational(t *testing.T) {
 	found := scanArchive(t, map[string]string{
 		"0_Analyze (go).txt": "2026-09-05T14:34:17Z ##[error]Something entirely unfamiliar went wrong with widgets\n",
 	})
@@ -129,14 +158,217 @@ func TestUnrecognizedAnnotationsAreReportedVerbatim(t *testing.T) {
 	if len(found) != 1 {
 		t.Fatalf("got %d diagnostics, want 1", len(found))
 	}
-	if found[0].Code != genericErrorCode {
-		t.Errorf("code = %q, want %q", found[0].Code, genericErrorCode)
+	if found[0].Severity != severityInfo {
+		t.Errorf("severity = %q, want info", found[0].Severity)
 	}
 	if !strings.Contains(found[0].Excerpt, "widgets") {
 		t.Errorf("excerpt = %q, want the original annotation text", found[0].Excerpt)
 	}
 	if strings.Contains(found[0].Message, "widgets") {
 		t.Error("the summary must not claim to interpret an unrecognized message")
+	}
+}
+
+// Genuine failures must still be escalated.
+func TestRealProblemsRemainWarningsOrErrors(t *testing.T) {
+	cases := map[string]string{
+		"We were unable to automatically build your code":                severityError,
+		"No source code was seen during the build":                       severityWarning,
+		"Java analysis failed to extract a dependency graph from gradle": severityWarning,
+		"CodeQL detected a low-quality scan":                             severityWarning,
+	}
+
+	for line, wantSeverity := range cases {
+		found := scanArchive(t, map[string]string{
+			"0_Analyze (java-kotlin).txt": "2026-09-05T14:34:17Z ##[warning]" + line + "\n",
+		})
+		if len(found) != 1 {
+			t.Errorf("Scan(%q) returned %d diagnostics, want 1", line, len(found))
+			continue
+		}
+		if found[0].Severity != wantSeverity {
+			t.Errorf("Scan(%q) severity = %q, want %q", line, found[0].Severity, wantSeverity)
+		}
+	}
+}
+
+// Real failure text captured from a repository whose CodeQL run failed. The
+// explanation follows a long command line, so the excerpt must reach it.
+const realFailureAnnotation = `Encountered a fatal error while running ` +
+	`"/opt/hostedtoolcache/CodeQL/2.26.4/x64/codeql/codeql database finalize --finalize-dataset ` +
+	`--threads=2 --ram=6913 /home/runner/work/_temp/codeql_databases/python". Exit code was 32 and ` +
+	`last log line was: CodeQL detected code written in GitHub Actions, but not an actions database.`
+
+func TestDatabaseFinalizeFailureIsNamedAndFullyQuoted(t *testing.T) {
+	found := scanArchive(t, map[string]string{
+		"0_Analyze (python).txt": "2026-09-05T14:34:17Z ##[error]" + realFailureAnnotation + "\n",
+	})
+
+	if len(found) != 1 {
+		t.Fatalf("got %d diagnostics, want 1", len(found))
+	}
+	if found[0].Code != "database-finalize-failed" {
+		t.Errorf("code = %q, want database-finalize-failed", found[0].Code)
+	}
+	if found[0].Severity != severityError {
+		t.Errorf("severity = %q, want error", found[0].Severity)
+	}
+	// The exit code and the explanation after it are the parts a customer
+	// cannot get anywhere else, so truncation must not cut them off.
+	if !strings.Contains(found[0].Excerpt, "Exit code was 32") {
+		t.Errorf("excerpt must include the exit code, got %q", found[0].Excerpt)
+	}
+	if !strings.Contains(found[0].Excerpt, "CodeQL detected code written in") {
+		t.Errorf("excerpt must reach the explanation after the command line, got %q", found[0].Excerpt)
+	}
+}
+
+// realDiagnosticGroups reproduces the CodeQL diagnostic blocks captured from a
+// real analysis run. These blocks are what the repository tool status page
+// displays, so parsing them is what lets this report agree with that page.
+const realDiagnosticGroups = `2026-09-09T20:11:00.1Z ##[group]C# analysis with build-mode 'none' completed
+2026-09-09T20:11:00.2Z * C# analysis with build-mode 'none' completed successfully.
+2026-09-09T20:11:00.3Z ##[endgroup]
+2026-09-09T20:11:01.1Z ##[group]Low C# analysis quality (1 result)
+2026-09-09T20:11:01.2Z * Scanning C# code completed successfully, but the scan encountered issues. This may be caused by problems identifying dependencies or use of generated source code. Some metrics of the database quality are: Percentage of calls with call target: 64 % (threshold 85 %). Percentage of expressions with known type: 78 % (threshold 85 %).
+2026-09-09T20:11:01.3Z ##[endgroup]
+2026-09-09T20:11:02.1Z ##[group]C# was extracted with build-mode set to 'none' (1 result)
+2026-09-09T20:11:02.2Z * C# was extracted with build-mode set to 'none'. This means that all C# source in the working directory will be scanned.
+2026-09-09T20:11:02.3Z ##[endgroup]
+`
+
+const realJavaDiagnosticGroups = `2026-09-09T20:11:00.1Z ##[group]14 duplicate classes filtered out (1 result)
+2026-09-09T20:11:00.2Z * 14 files defined a class that clashes with the fully-qualified name of another scanned class. This means that only one of each clashing pair will be scanned.
+2026-09-09T20:11:00.3Z ##[endgroup]
+2026-09-09T20:11:01.1Z ##[group]Java was extracted with build-mode set to 'none' (1 result)
+2026-09-09T20:11:01.2Z * Java was extracted with build-mode set to 'none'.
+2026-09-09T20:11:01.3Z ##[endgroup]
+2026-09-09T20:11:02.1Z ##[group]Java analysis used the system default JDK (1 result)
+2026-09-09T20:11:02.2Z * Java analysis used the system default JDK.
+2026-09-09T20:11:02.3Z ##[endgroup]
+`
+
+// The tool status page for this run shows a warning and a suggestion per
+// language. The report must reproduce both, with the same severity split.
+func TestDiagnosticGroupsReproduceTheToolStatusPage(t *testing.T) {
+	found := scanArchive(t, map[string]string{
+		"Analyze (csharp)/6_Perform CodeQL Analysis.txt":      realDiagnosticGroups,
+		"Analyze (java-kotlin)/6_Perform CodeQL Analysis.txt": realJavaDiagnosticGroups,
+	})
+
+	byMessage := map[string]model.Diagnostic{}
+	for _, diagnostic := range found {
+		byMessage[diagnostic.Message] = diagnostic
+	}
+
+	quality, ok := byMessage["Low C# analysis quality"]
+	if !ok {
+		t.Fatalf("expected the low analysis quality diagnostic, got %+v", byMessage)
+	}
+	if quality.Severity != severityWarning {
+		t.Errorf("low analysis quality severity = %q, want warning", quality.Severity)
+	}
+	if quality.Language != model.LangCSharp {
+		t.Errorf("low analysis quality language = %q, want csharp", quality.Language)
+	}
+	// The metrics are the actionable part and must survive into the excerpt.
+	if !strings.Contains(quality.Excerpt, "64 %") || !strings.Contains(quality.Excerpt, "threshold 85 %") {
+		t.Errorf("excerpt must keep the quality metrics, got %q", quality.Excerpt)
+	}
+
+	duplicates, ok := byMessage["14 duplicate classes filtered out"]
+	if !ok {
+		t.Fatalf("expected the duplicate classes diagnostic, got %+v", byMessage)
+	}
+	if duplicates.Severity != severityWarning {
+		t.Errorf("duplicate classes severity = %q, want warning", duplicates.Severity)
+	}
+	if duplicates.Language != model.LangJavaKotlin {
+		t.Errorf("duplicate classes language = %q, want java-kotlin", duplicates.Language)
+	}
+
+	// Build-mode notes are suggestions on the status page, not warnings.
+	for _, message := range []string{
+		"C# was extracted with build-mode set to 'none'",
+		"Java was extracted with build-mode set to 'none'",
+		"Java analysis used the system default JDK",
+	} {
+		diagnostic, ok := byMessage[message]
+		if !ok {
+			t.Errorf("expected diagnostic %q", message)
+			continue
+		}
+		if diagnostic.Severity != severityInfo {
+			t.Errorf("%q severity = %q, want info", message, diagnostic.Severity)
+		}
+	}
+}
+
+// The same diagnostics appear in both the per-language job log and the
+// combined analysis step log, so they must be reported once.
+func TestDiagnosticGroupsAreDeduplicatedAcrossLogFiles(t *testing.T) {
+	found := scanArchive(t, map[string]string{
+		"5_Analyze (csharp).txt":                         realDiagnosticGroups,
+		"Analyze (csharp)/6_Perform CodeQL Analysis.txt": realDiagnosticGroups,
+	})
+
+	counts := map[string]int{}
+	for _, diagnostic := range found {
+		counts[diagnostic.Message]++
+	}
+	for message, count := range counts {
+		if count != 1 {
+			t.Errorf("diagnostic %q reported %d times, want once", message, count)
+		}
+	}
+}
+
+// Ordinary log grouping must not be mistaken for a CodeQL diagnostic.
+func TestOrdinaryLogGroupsAreIgnored(t *testing.T) {
+	found := scanArchive(t, map[string]string{
+		"0_Analyze (go).txt": "" +
+			"2026-09-09T20:11:00Z ##[group]Run github/codeql-action/init@v3\n" +
+			"2026-09-09T20:11:00Z with:\n" +
+			"2026-09-09T20:11:00Z   languages: go\n" +
+			"2026-09-09T20:11:00Z ##[endgroup]\n",
+	})
+
+	if len(found) != 0 {
+		t.Fatalf("ordinary log groups must not produce diagnostics, got %+v", found)
+	}
+}
+
+// A diagnostic title that is not recognized must not turn a repository red.
+func TestUnknownDiagnosticGroupsAreInformational(t *testing.T) {
+	found := scanArchive(t, map[string]string{
+		"0_Analyze (go).txt": "" +
+			"2026-09-09T20:11:00Z ##[group]Some entirely new diagnostic (1 result)\n" +
+			"2026-09-09T20:11:00Z * Details about the new diagnostic.\n" +
+			"2026-09-09T20:11:00Z ##[endgroup]\n",
+	})
+
+	if len(found) != 1 {
+		t.Fatalf("got %d diagnostics, want 1", len(found))
+	}
+	if found[0].Severity != severityInfo {
+		t.Errorf("severity = %q, want info", found[0].Severity)
+	}
+	if found[0].Message != "Some entirely new diagnostic" {
+		t.Errorf("message = %q, want the diagnostic title verbatim", found[0].Message)
+	}
+}
+
+func TestMissingWorkflowFileIsNamed(t *testing.T) {
+	line := "Unable to validate code scanning workflow: error: getWorkflow() failed: Error: " +
+		"Expected to find a code scanning workflow file at " +
+		"/home/runner/work/app/app/dynamic/github-code-scanning/codeql, but no such file existed."
+
+	found := scanArchive(t, map[string]string{
+		"0_Analyze (javascript-typescript).txt": "2026-09-05T14:34:17Z ##[warning]" + line + "\n",
+	})
+
+	if len(found) != 1 || found[0].Code != "workflow-file-missing" {
+		t.Fatalf("got %+v, want a workflow-file-missing diagnostic", found)
 	}
 }
 

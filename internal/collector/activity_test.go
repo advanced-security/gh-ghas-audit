@@ -116,49 +116,6 @@ func TestActivityBoundaryAtTheInactivityWindow(t *testing.T) {
 	}
 }
 
-// An organization that has not enabled monthly scanning of inactive
-// repositories does not want them reported stale forever.
-func TestInactiveStalenessCanBeDisabled(t *testing.T) {
-	client := buildClient(t, activityScenario("dormant", 500*day, 400*day))
-
-	options := defaultActivityOptions()
-	options.StaleAfterInactive = 0
-
-	repo := findRepo(t, collect(t, client, options), "dormant")
-
-	if repo.Status.Freshness != model.FreshCurrent {
-		t.Fatalf("freshness = %q, want current when the inactive check is off", repo.Status.Freshness)
-	}
-	if repo.Status.Overall != model.SeverityHealthy {
-		t.Fatalf("overall = %q, want healthy", repo.Status.Overall)
-	}
-	if repo.StaleAfter != "not checked (inactive)" {
-		t.Errorf("stale after = %q, want it to say the check was skipped", repo.StaleAfter)
-	}
-	// The scan age is still recorded, so the data is available even when it
-	// does not drive a verdict.
-	if repo.StaleDays == nil || *repo.StaleDays < 490 {
-		t.Errorf("scan age must still be reported, got %v", repo.StaleDays)
-	}
-}
-
-// Turning off activity classification restores the single-threshold behaviour.
-func TestActivityClassificationCanBeDisabled(t *testing.T) {
-	client := buildClient(t, activityScenario("dormant", 20*day, 400*day))
-
-	options := defaultActivityOptions()
-	options.InactiveAfter = 0
-
-	repo := findRepo(t, collect(t, client, options), "dormant")
-
-	if repo.Activity != model.ActivityActive {
-		t.Fatalf("activity = %q, want active when classification is disabled", repo.Activity)
-	}
-	if repo.Status.Overall != model.SeverityStale {
-		t.Fatalf("overall = %q, want stale under the weekly threshold", repo.Status.Overall)
-	}
-}
-
 // A repository with no push history cannot be classified, and must not be
 // quietly given the more permissive monthly threshold.
 func TestUnknownPushHistoryUsesTheActiveThreshold(t *testing.T) {
@@ -173,6 +130,21 @@ func TestUnknownPushHistoryUsesTheActiveThreshold(t *testing.T) {
 	}
 	if repo.Status.Overall != model.SeverityStale {
 		t.Fatalf("overall = %q, want stale; unknown activity must not relax the threshold", repo.Status.Overall)
+	}
+}
+
+// However long a repository has been dormant, an absent scan is still an
+// absent scan. Reporting it as healthy would be a false negative.
+func TestLongDormantRepositoryIsStillReportedStale(t *testing.T) {
+	client := buildClient(t, activityScenario("dormant", 500*day, 400*day))
+
+	repo := findRepo(t, collect(t, client, defaultActivityOptions()), "dormant")
+
+	if repo.Status.Overall != model.SeverityStale {
+		t.Fatalf("overall = %q, want stale", repo.Status.Overall)
+	}
+	if repo.StaleDays == nil || *repo.StaleDays < 490 {
+		t.Errorf("scan age must be reported, got %v", repo.StaleDays)
 	}
 }
 

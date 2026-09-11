@@ -66,16 +66,23 @@ type Scope struct {
 // Settings records the thresholds and options that produced the results, so
 // that a stale classification can always be explained after the fact.
 type Settings struct {
-	StaleAfter            string   `json:"stale_after"`
-	StaleAfterSeconds     float64  `json:"stale_after_seconds"`
-	StaleAfterInactive    string   `json:"stale_after_inactive,omitempty"`
-	InactiveAfter         string   `json:"inactive_after,omitempty"`
-	SkipArchived          bool     `json:"skip_archived"`
-	SkipForks             bool     `json:"skip_forks"`
-	SecurityConfiguration string   `json:"security_configuration,omitempty"`
-	Properties            []string `json:"properties,omitempty"`
-	GroupByProperty       string   `json:"group_by_property,omitempty"`
-	Concurrency           int      `json:"concurrency"`
+	StaleAfter            string              `json:"stale_after"`
+	StaleAfterSeconds     float64             `json:"stale_after_seconds"`
+	StaleAfterInactive    string              `json:"stale_after_inactive,omitempty"`
+	InactiveAfter         string              `json:"inactive_after,omitempty"`
+	SkipArchived          bool                `json:"skip_archived"`
+	SkipForks             bool                `json:"skip_forks"`
+	SecurityConfiguration string              `json:"security_configuration,omitempty"`
+	Properties            []string            `json:"properties,omitempty"`
+	GroupByProperty       string              `json:"group_by_property,omitempty"`
+	Match                 []string            `json:"match,omitempty"`
+	Exclude               []string            `json:"exclude,omitempty"`
+	Visibility            []string            `json:"visibility,omitempty"`
+	PropertyFilters       map[string][]string `json:"property_filters,omitempty"`
+	Status                []Severity          `json:"status,omitempty"`
+	Language              []Language          `json:"language,omitempty"`
+	Activity              []Activity          `json:"activity,omitempty"`
+	Concurrency           int                 `json:"concurrency"`
 	// ScanDepth records how much evidence this report is based on, so a
 	// stored artifact states what it did and did not check.
 	ScanDepth       string `json:"scan_depth,omitempty"`

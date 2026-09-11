@@ -253,10 +253,13 @@ func executionCell(repo model.Repo) string {
 
 func lastScanCell(repo model.Repo) string {
 	if repo.LastSuccessfulScan == nil {
-		// Freshness was deliberately not measured, so "never" would assert
-		// something this scan never checked.
-		if repo.Status.Freshness == model.FreshNotEvaluated {
+		switch repo.Status.Freshness {
+		case model.FreshNotEvaluated, model.FreshNotApplicable:
 			return "-"
+		case model.FreshUnknown:
+			return "unknown"
+		case model.FreshNever:
+			return "never"
 		}
 		if model.IsScanning(repo.Status.Configuration) {
 			return "never"

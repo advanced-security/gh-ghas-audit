@@ -82,6 +82,32 @@ func TestParsePropertyFiltersValidatesEveryValue(t *testing.T) {
 	}
 }
 
+func TestPropertyFilterFlagPreservesValueAlternatives(t *testing.T) {
+	command := newCodeScanningCommand(&scopeOptions{})
+	if err := command.ParseFlags([]string{
+		"--property-filter", "Project=A,B",
+		"--property-filter", "Tier=1,2",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	values, err := command.Flags().GetStringArray("property-filter")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"Project=A,B", "Tier=1,2"}
+	if !reflect.DeepEqual(values, want) {
+		t.Fatalf("property filter occurrences = %v, want %v", values, want)
+	}
+	filters, err := parsePropertyFilters(values)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(filters["Project"], []string{"A", "B"}) ||
+		!reflect.DeepEqual(filters["Tier"], []string{"1", "2"}) {
+		t.Fatalf("property alternatives were not parsed after NAME=: %v", filters)
+	}
+}
+
 func TestRepositoryScopeConflictsFailBeforeCacheAndCollection(t *testing.T) {
 	for _, scope := range []struct{ flag, value string }{
 		{"--organization", "acme"},

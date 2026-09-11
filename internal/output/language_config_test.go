@@ -50,3 +50,28 @@ func TestLanguageCSVDoesNotInventConfigRuntimeEvidence(t *testing.T) {
 		}
 	}
 }
+
+func TestLanguageCSVPlaceholderHasNoRuntimeEvidence(t *testing.T) {
+	report := &model.Report{
+		Settings: model.Settings{ScanDepth: "health"},
+		Repositories: []model.Repo{{
+			Name: "empty", Organization: "org",
+			Status: model.Status{Execution: model.ExecNoWorkflow},
+		}},
+	}
+	var buffer bytes.Buffer
+	if err := WriteLanguageCSV(&buffer, report, nil); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := csv.NewReader(&buffer).ReadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	values := map[string]string{}
+	for index, column := range rows[0] {
+		values[column] = rows[1][index]
+	}
+	if values["Language"] != "" || values["Analyzed"] != "" || values["Succeeded"] != "" {
+		t.Fatalf("placeholder invented a language result: %v", values)
+	}
+}

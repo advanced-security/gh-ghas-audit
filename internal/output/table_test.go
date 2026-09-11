@@ -120,3 +120,25 @@ func TestWriteTableRespectsTerminalColors(t *testing.T) {
 		})
 	}
 }
+
+func TestLastScanCellPreservesUnknownFreshness(t *testing.T) {
+	for _, test := range []struct {
+		freshness model.FreshnessStatus
+		want      string
+	}{
+		{model.FreshUnknown, "unknown"},
+		{model.FreshNever, "never"},
+		{model.FreshNotEvaluated, "-"},
+		{model.FreshNotApplicable, "-"},
+	} {
+		repo := model.Repo{
+			Status: model.Status{
+				Configuration: model.ConfigConfigured,
+				Freshness:     test.freshness,
+			},
+		}
+		if got := lastScanCell(repo); got != test.want {
+			t.Errorf("freshness %s rendered as %q, want %q", test.freshness, got, test.want)
+		}
+	}
+}

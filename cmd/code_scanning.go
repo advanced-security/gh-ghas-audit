@@ -110,7 +110,7 @@ Examples:
 		"Custom property to include as a column (repeatable)")
 	flags.StringVar(&opts.groupByProperty, "group-by-property", "",
 		"Group summary counts by a custom property, such as an application name")
-	flags.StringSliceVar(&opts.propertyFilters, "property-filter", nil,
+	flags.StringArrayVar(&opts.propertyFilters, "property-filter", nil,
 		"Only include repositories whose custom property matches, as NAME=VALUE (repeatable, supports * wildcards)")
 
 	flags.StringSliceVar(&opts.statusFilter, "status", nil,
@@ -308,6 +308,13 @@ func (opts *codeScanningOptions) run(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+	report.Settings.Match = append([]string(nil), opts.nameFilter...)
+	report.Settings.Exclude = append([]string(nil), opts.excludeFilter...)
+	report.Settings.Visibility = append([]string(nil), visibilityFilter...)
+	report.Settings.PropertyFilters = clonePropertyFilters(propertyFilters)
+	report.Settings.Status = append([]model.Severity(nil), statusFilter...)
+	report.Settings.Language = append([]model.Language(nil), languageFilter...)
+	report.Settings.Activity = append([]model.Activity(nil), activityFilter...)
 
 	if err := store.Save(); err != nil {
 		progress(fmt.Sprintf("warning: cache could not be saved: %v", err))
@@ -690,6 +697,17 @@ func parsePropertyFilters(values []string) (map[string][]string, error) {
 		filters[key] = append(filters[key], patterns...)
 	}
 	return filters, nil
+}
+
+func clonePropertyFilters(filters map[string][]string) map[string][]string {
+	if len(filters) == 0 {
+		return nil
+	}
+	cloned := make(map[string][]string, len(filters))
+	for name, values := range filters {
+		cloned[name] = append([]string(nil), values...)
+	}
+	return cloned
 }
 
 func parseDeepDiagnostics(value string) (collector.DeepDiagnosticsMode, error) {

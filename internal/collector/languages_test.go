@@ -8,7 +8,7 @@ import (
 
 func TestUnsupportedLanguagesReportsGenuineCoverageGaps(t *testing.T) {
 	source := apiRepository{}
-	for _, name := range []string{"HTML", "CSS", "Scala", "Go", "Dockerfile", "Objective-C", "Shell"} {
+	for _, name := range []string{"HTML", "CSS", "Scala", "Go", "Dockerfile", "Objective-C", "Shell", "PowerShell"} {
 		source.Languages.Nodes = append(source.Languages.Nodes, struct {
 			Name string `json:"name"`
 		}{Name: name})
@@ -16,10 +16,9 @@ func TestUnsupportedLanguagesReportsGenuineCoverageGaps(t *testing.T) {
 
 	got := unsupportedLanguages(source)
 
-	// Go is analyzable, and HTML, CSS, Dockerfile and Shell are markup or
-	// build description formats that appear almost everywhere. Only the real
-	// source languages CodeQL cannot analyze should be reported.
-	want := []string{"Objective-C", "Scala"}
+	// Go is analyzable, while HTML, CSS and Dockerfile are markup or build
+	// description formats. Executable Shell and PowerShell source is reported.
+	want := []string{"Objective-C", "PowerShell", "Scala", "Shell"}
 	if len(got) != len(want) {
 		t.Fatalf("unsupportedLanguages = %v, want %v", got, want)
 	}

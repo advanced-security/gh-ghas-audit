@@ -300,8 +300,8 @@ func unsupportedLanguages(source apiRepository) []string {
 // the languages that genuinely lack a scanner, such as Scala or Objective-C.
 var nonSourceLanguages = map[string]bool{
 	"html": true, "css": true, "scss": true, "sass": true, "less": true,
-	"dockerfile": true, "makefile": true, "cmake": true, "shell": true,
-	"batchfile": true, "powershell": true, "yaml": true, "json": true,
+	"dockerfile": true, "makefile": true, "cmake": true,
+	"batchfile": true, "yaml": true, "json": true,
 	"xml": true, "markdown": true, "text": true, "vim script": true,
 	"jinja": true, "handlebars": true, "mustache": true, "smarty": true,
 	"procfile": true, "editorconfig": true, "gnuplot": true, "roff": true,

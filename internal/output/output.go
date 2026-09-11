@@ -251,7 +251,8 @@ func WriteLanguageCSV(writer io.Writer, report *model.Report, propertyColumns []
 		}
 		for _, state := range states {
 			var analyzed, succeeded string
-			if report.Settings.ScanDepth != "config" && repo.Status.Execution != model.ExecNotEvaluated &&
+			if state.Language != "" && report.Settings.ScanDepth != "config" &&
+				repo.Status.Execution != model.ExecNotEvaluated &&
 				state.RuntimeEvaluation != model.RuntimeNotEvaluated {
 				analyzed = strconv.FormatBool(state.Analyzed)
 				succeeded = strconv.FormatBool(state.Succeeded)

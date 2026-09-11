@@ -2,6 +2,7 @@ package collector
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
@@ -60,6 +61,56 @@ func TestUnlicensedRepositoryIsNotTreatedAsACollectionError(t *testing.T) {
 	}
 	if len(repo.Errors) != 0 {
 		t.Errorf("a licensing error is not a collection failure, got %v", repo.Errors)
+	}
+}
+
+func TestArchivedRepositoryWithCodeScanningDisabledIsExpectedUnavailable(t *testing.T) {
+	client := buildClient(t, scenario{name: "archived", languages: []string{"Go"}})
+	client.set("repos/"+testOrg+"/archived/code-scanning/default-setup", &ghapi.StatusError{
+		StatusCode: http.StatusForbidden,
+		Message:    "Code scanning is not enabled for this repository",
+	})
+	client.graphql = func(_ string, _ map[string]any, out any) error {
+		payload := map[string]any{"organization": map[string]any{"repositories": map[string]any{
+			"pageInfo": map[string]any{"hasNextPage": false, "endCursor": ""},
+			"nodes": []map[string]any{{
+				"name": "archived", "url": "https://github.com/" + testOrg + "/archived",
+				"isArchived": true, "isFork": false, "visibility": "PRIVATE",
+				"defaultBranchRef": map[string]string{"name": "main"},
+				"languages": map[string]any{"nodes": []map[string]string{{"name": "Go"}},
+					"pageInfo": map[string]any{"hasNextPage": false}},
+			}},
+		}}}
+		encoded, err := json.Marshal(payload)
+		if err != nil {
+			return err
+		}
+		return json.Unmarshal(encoded, out)
+	}
+
+	report := collect(t, client, Options{})
+	repo := findRepo(t, report, "archived")
+
+	if repo.Status.Configuration != model.ConfigUnavailable || repo.Status.Overall != model.SeverityUnavailable {
+		t.Fatalf("archived repository status = %+v, want unavailable", repo.Status)
+	}
+	if repo.Status.Incomplete || report.Stats.Incomplete || len(repo.Errors) != 0 {
+		t.Fatalf("expected archived unavailability became a collection failure: repo=%+v report=%+v", repo, report.Stats)
+	}
+}
+
+func TestActiveRepositoryWithCodeScanningDisabledResponseIsIncomplete(t *testing.T) {
+	client := buildClient(t, scenario{name: "active-disabled", languages: []string{"Go"}})
+	client.set("repos/"+testOrg+"/active-disabled/code-scanning/default-setup", &ghapi.StatusError{
+		StatusCode: http.StatusForbidden,
+		Message:    "Code scanning is not enabled for this repository",
+	})
+
+	report := collect(t, client, Options{})
+	repo := findRepo(t, report, "active-disabled")
+
+	if !repo.Status.Incomplete || !report.Stats.Incomplete || len(repo.Errors) == 0 {
+		t.Fatalf("unexpected active 403 was treated as expected: repo=%+v report=%+v", repo, report.Stats)
 	}
 }
 

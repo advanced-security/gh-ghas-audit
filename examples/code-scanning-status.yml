@@ -1,5 +1,5 @@
 # Copy into .github/workflows/ after the v2 release.
-# App read permissions: Metadata, Actions, Code scanning alerts,
+# App read permissions: Metadata, Pull requests, Actions, Code scanning alerts,
 # organization Administration and Custom properties.
 name: Code scanning status
 

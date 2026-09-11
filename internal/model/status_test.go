@@ -141,6 +141,26 @@ func TestClassifyPrecedence(t *testing.T) {
 			want: SeverityNotConfigured,
 		},
 		{
+			name: "config depth cannot distinguish disabled default setup from advanced setup",
+			status: Status{
+				Configuration: ConfigNotConfigured,
+				Execution:     ExecNotEvaluated,
+				Freshness:     FreshNotEvaluated,
+				Coverage:      CoverageGap,
+			},
+			want: SeverityUnknown,
+		},
+		{
+			name: "external CI is detected without inventing health",
+			status: Status{
+				Configuration: ConfigExternalCI,
+				Execution:     ExecNotApplicable,
+				Freshness:     FreshUnknown,
+				Coverage:      CoverageUnknown,
+			},
+			want: SeverityUnknown,
+		},
+		{
 			name: "unconfigured repository with nothing to scan is not a gap",
 			status: Status{
 				Configuration: ConfigNotConfigured,

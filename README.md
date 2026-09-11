@@ -34,7 +34,7 @@ One command and one collector. Every depth supports enterprise scope, filtering,
 
 | `--scan-depth` | Evidence | Use / limitation |
 | --- | --- | --- |
-| `config` | Inventory, default-setup languages and security-configuration attachment | Corrected legacy configuration audit. No runs, jobs, analyses, databases or logs. Never reports `healthy`; cannot recognize advanced setup. |
+| `config` | Inventory, default-setup languages and security-configuration attachment | Corrected legacy configuration audit. No runs, jobs, analyses, databases or logs. Never reports `healthy`; default setup off is `unknown` because advanced setup is not evaluated. |
 | `health` **(default)** | Config plus workflows, runs, jobs, analyses and CodeQL databases | Default and advanced Actions workflow health. Does not see log-only quality warnings. |
 | `diagnostics` | Health plus available latest-completed-run logs | Finds warnings behind successful workflows. Best effort and more expensive. |
 
@@ -78,7 +78,7 @@ gh ghas-audit code-scanning -o my-org --match 'service-*' --exclude '*-sandbox'
 
 | Dimension | Values |
 | --- | --- |
-| `configuration` | `configured`, `not-configured`, `advanced-setup`, `attaching`, `updating`, `attach-failed`, `unavailable`, `unknown` |
+| `configuration` | `configured`, `not-configured`, `advanced-setup`, `external-ci`, `attaching`, `updating`, `attach-failed`, `unavailable`, `unknown` |
 | `execution` | `success`, `failure`, `timed-out`, `cancelled`, `action-required`, `startup-failure`, `in-progress`, `queued`, `disabled`, `no-workflow`, `no-completed-run`, `not-applicable`, `not-evaluated`, `unknown` |
 | `freshness` | `current`, `stale`, `never-scanned`, `not-applicable`, `not-evaluated`, `unknown` |
 | `coverage` | `complete`, `partial`, `gap`, `no-supported-languages`, `not-applicable`, `unknown` |
@@ -180,7 +180,7 @@ Log findings carry `"source": "log"`. For example, low C# analysis quality or du
 
 | Capability | Read permission |
 | --- | --- |
-| Repository inventory | Repository Metadata |
+| Repository inventory | Repository Metadata and Pull requests |
 | Default setup, analyses, databases | Repository Code scanning alerts |
 | Runs, jobs, logs | Repository Actions |
 | Security configurations and attachment | Organization Administration |
@@ -190,7 +190,7 @@ Log findings carry `"source": "log"`. For example, low C# analysis quality or du
 GitHub App installation tokens work per organization, not for enterprise discovery. The workflow `GITHUB_TOKEN` cannot inventory an organization. An environment token overrides stored `gh auth` credentials.
 
 - No exact tool-status-page parity: log format and retention limit diagnostics.
-- Advanced workflow/language selection is inferred from observed analyses, not authoritative intended configuration. Third-party SARIF health is not evaluated.
+- Advanced workflow/language selection is inferred from observed analyses, not authoritative intended configuration. CodeQL from external CI is detected as `external-ci`, but its health and free-form category coverage are not evaluated. Third-party SARIF health is not evaluated.
 - `actions` cannot be inferred from repository language statistics, so it is excluded from detected-language gaps.
 - Config depth cannot distinguish advanced setup from default setup being off.
 - Missing organization metadata is reported as a warning; explicit filters that cannot be evaluated fail that scope.

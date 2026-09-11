@@ -17,9 +17,11 @@ const (
 	// ConfigNotConfigured means default setup is available but switched off.
 	ConfigNotConfigured ConfigurationStatus = "not-configured"
 	// ConfigAdvancedSetup means default setup is off and CodeQL uses a
-	// repository-managed workflow or is inferred from analyses. Health is
-	// evaluated from the selected workflows and analyses.
+	// repository-managed Actions workflow.
 	ConfigAdvancedSetup ConfigurationStatus = "advanced-setup"
+	// ConfigExternalCI means CodeQL analyses from a non-Actions CI system were
+	// detected. Their configuration and health are not evaluated.
+	ConfigExternalCI ConfigurationStatus = "external-ci"
 	// ConfigAttaching means a security configuration is still being applied.
 	ConfigAttaching ConfigurationStatus = "attaching"
 	// ConfigUpdating means a security configuration is being updated.
@@ -318,7 +320,16 @@ func classify(status *Status, hasWarning bool) (Severity, []string) {
 		if status.Coverage == CoverageNoSupportedLanguages {
 			return SeverityNotApplicable, []string{"no CodeQL-supported languages detected"}
 		}
+		if status.Execution == ExecNotEvaluated {
+			return SeverityUnknown, []string{
+				"default setup is disabled; advanced setup was not evaluated at this scan depth",
+			}
+		}
 		return SeverityNotConfigured, []string{"code scanning default setup is not enabled"}
+	case ConfigExternalCI:
+		return SeverityUnknown, []string{
+			"CodeQL analyses from external CI were detected, but external CI health is not evaluated",
+		}
 	case ConfigAttachFailed:
 		return SeverityStalled, []string{"security configuration failed to attach"}
 	case ConfigAttaching, ConfigUpdating:

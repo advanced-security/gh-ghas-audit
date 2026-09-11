@@ -110,7 +110,7 @@ func (c *Collector) collectRepository(ctx context.Context, org string, source ap
 	}
 	// Missing or explicitly disabled features describe availability. Permission
 	// failures and transient errors leave evidence incomplete.
-	if setupErr != nil && !ghapi.IsNotFound(setupErr) && !featureUnavailable(setupErr) {
+	if setupErr != nil && !ghapi.IsNotFound(setupErr) && !featureUnavailable(setupErr, repo.Archived) {
 		repo.Errors = append(repo.Errors, fmt.Sprintf("default setup: %v", setupErr))
 	}
 
@@ -140,7 +140,22 @@ func (c *Collector) collectRepository(ctx context.Context, org string, source ap
 			// are not evidence of an advanced setup workflow. Treating them as
 			// such would replace a genuine rollout gap with a claim that the
 			// repository scans itself.
-			if report != nil && !report.DefaultSetup && !isManagedWorkflowPath(report.WorkflowPath) {
+			if report != nil && !report.DefaultSetup && !isManagedWorkflowPath(report.SourceKey) {
+				if report.WorkflowPath == "" {
+					repo.Status.Configuration = model.ConfigExternalCI
+					repo.Status.Execution = model.ExecNotApplicable
+					repo.Status.Freshness = model.FreshUnknown
+					repo.Status.Coverage = model.CoverageUnknown
+					repo.Languages = languages.Sorted()
+					repo.Diagnostics = append(repo.Diagnostics, model.Diagnostic{
+						Source:   model.SourceAPI,
+						Severity: "info",
+						Code:     "external-ci-not-evaluated",
+						Message:  "CodeQL analyses from external CI were detected, but external CI health is not evaluated",
+					})
+					finalizeStatus(&repo, false)
+					return repo
+				}
 				repo.Status.Configuration = model.ConfigAdvancedSetup
 				c.evaluateAdvancedSetup(ctx, org, source.Name, &repo, languages, evidence, report, detected)
 				return repo
@@ -211,7 +226,7 @@ type repoContext struct {
 	AttachmentStatus  string
 }
 
-func featureUnavailable(err error) bool {
+func featureUnavailable(err error, archived bool) bool {
 	var status *ghapi.StatusError
 	if !ghapi.IsForbidden(err) || !errors.As(err, &status) {
 		return false
@@ -223,6 +238,8 @@ func featureUnavailable(err error) bool {
 		"code security must be enabled for this repository",
 		"code security must be enabled for this repository to use code scanning":
 		return true
+	case "code scanning is not enabled for this repository":
+		return archived
 	default:
 		return false
 	}
@@ -353,8 +370,11 @@ type analysisSummary struct {
 type analysisReport struct {
 	Newest    *time.Time
 	Languages map[model.Language]*analysisSummary
+	// SourceKey groups analyses produced by the same CodeQL configuration.
+	// For Actions this is a workflow path; external CI can use any stable key.
+	SourceKey string
 	// WorkflowPath is the workflow that produced the newest analysis, taken
-	// from analysis_key.
+	// from analysis_key. It is empty for CodeQL uploads from external CI.
 	WorkflowPath string
 	// DefaultSetup reports whether that workflow is the managed default setup
 	// workflow rather than one the repository controls.
@@ -366,13 +386,25 @@ type analysisReport struct {
 // so anything that does not match this shape is ignored rather than guessed at.
 var analysisCategoryPattern = regexp.MustCompile(`(?i)language:([a-z0-9_+-]+)`)
 
-// workflowPathFromAnalysisKey returns the workflow path portion of an
-// analysis key, which has the form "<workflow path>:<job name>".
-func workflowPathFromAnalysisKey(key string) string {
+// sourceKeyFromAnalysisKey returns the configuration portion of an analysis
+// key. Actions uses "<workflow path>:<job name>"; external CI keys are
+// otherwise free-form.
+func sourceKeyFromAnalysisKey(key string) string {
 	if index := strings.LastIndex(key, ":"); index > 0 {
 		return key[:index]
 	}
 	return key
+}
+
+func actionsWorkflowPath(sourceKey string) string {
+	if sourceKey == codeqlWorkflowPath {
+		return sourceKey
+	}
+	if strings.HasPrefix(sourceKey, ".github/workflows/") &&
+		(strings.HasSuffix(sourceKey, ".yml") || strings.HasSuffix(sourceKey, ".yaml")) {
+		return sourceKey
+	}
+	return ""
 }
 
 // isManagedWorkflowPath reports whether a workflow path belongs to a
@@ -431,14 +463,15 @@ func (c *Collector) collectAnalyses(ctx context.Context, org, name, branch strin
 			continue
 		}
 		report.Newest = analyses[index].CreatedAt
-		report.WorkflowPath = workflowPathFromAnalysisKey(analyses[index].AnalysisKey)
-		report.DefaultSetup = report.WorkflowPath == codeqlWorkflowPath
+		report.SourceKey = sourceKeyFromAnalysisKey(analyses[index].AnalysisKey)
+		report.WorkflowPath = actionsWorkflowPath(report.SourceKey)
+		report.DefaultSetup = report.SourceKey == codeqlWorkflowPath
 		break
 	}
 
 	for index := range analyses {
 		analysis := &analyses[index]
-		if workflowPathFromAnalysisKey(analysis.AnalysisKey) != report.WorkflowPath {
+		if sourceKeyFromAnalysisKey(analysis.AnalysisKey) != report.SourceKey {
 			continue
 		}
 
@@ -870,7 +903,7 @@ func (c *Collector) collectLanguageEvidence(
 
 	var databases []codeqlDatabase
 	if err := c.client.GetJSON(ctx, path, &databases); err != nil {
-		if !ghapi.IsNotFound(err) && !featureUnavailable(err) {
+		if !ghapi.IsNotFound(err) && !featureUnavailable(err, repo.Archived) {
 			repo.Errors = append(repo.Errors, fmt.Sprintf("codeql databases: %v", err))
 		}
 		return

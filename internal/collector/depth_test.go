@@ -160,6 +160,41 @@ func TestConfigDepthDoesNotFetchRuntimeEvidence(t *testing.T) {
 	}
 }
 
+func TestConfigDepthDoesNotClaimDefaultSetupOffMeansNoScanning(t *testing.T) {
+	client := buildClient(t, scenario{
+		name:         "possibly-advanced",
+		languages:    []string{"Go"},
+		defaultSetup: defaultSetup{State: "not-configured"},
+	})
+	options := defaultActivityOptions()
+	options.Depth = DepthConfig
+
+	repo := findRepo(t, collect(t, client, options), "possibly-advanced")
+
+	if repo.Status.Configuration != model.ConfigNotConfigured {
+		t.Fatalf("configuration = %q, want the observed default-setup state", repo.Status.Configuration)
+	}
+	if repo.Status.Overall != model.SeverityUnknown || repo.Status.Incomplete {
+		t.Fatalf("config depth must express intentional ambiguity, got %+v", repo.Status)
+	}
+	if !strings.Contains(strings.Join(repo.Status.Reasons, " "), "advanced setup was not evaluated") {
+		t.Fatalf("reason does not explain the depth limitation: %v", repo.Status.Reasons)
+	}
+}
+
+func TestConfigDepthStillReportsEmptyRepositoryNotApplicable(t *testing.T) {
+	client := buildClient(t, scenario{
+		name:         "empty-off",
+		defaultSetup: defaultSetup{State: "not-configured"},
+	})
+	options := defaultActivityOptions()
+	options.Depth = DepthConfig
+	repo := findRepo(t, collect(t, client, options), "empty-off")
+	if repo.Status.Overall != model.SeverityNotApplicable {
+		t.Fatalf("overall = %q, want not-applicable", repo.Status.Overall)
+	}
+}
+
 func TestUnconfiguredGapsPersistAcrossDepths(t *testing.T) {
 	for _, depth := range []Depth{DepthConfig, DepthHealth, DepthDiagnostics} {
 		t.Run(string(depth), func(t *testing.T) {

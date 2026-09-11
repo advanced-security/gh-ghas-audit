@@ -208,10 +208,11 @@ func TestAdvancedSetupLanguageErrorSurvivesASuccessfulRun(t *testing.T) {
 	}
 }
 
-// A repository analyzed by CodeQL outside Actions has an analysis key that
-// names no workflow. Its analyses are still proof of a recent successful scan,
-// so it must not be reported as never scanned.
-func TestAnalysisOutsideActionsCountsAsScanEvidence(t *testing.T) {
+// External CI analysis keys do not name an Actions workflow. Their categories
+// are free-form and can represent several applications in one repository, so
+// treating a recognized language category as complete repository coverage
+// would overclaim support.
+func TestAnalysisOutsideActionsIsDetectedButNotEvaluated(t *testing.T) {
 	analysed := time.Now().Add(-2 * time.Hour)
 	client := buildClient(t, scenario{
 		name:         "external-ci",
@@ -224,11 +225,34 @@ func TestAnalysisOutsideActionsCountsAsScanEvidence(t *testing.T) {
 
 	repo := findRepo(t, collect(t, client, defaultActivityOptions()), "external-ci")
 
-	if repo.LastSuccessfulScan == nil {
-		t.Fatal("a clean recent analysis is scan evidence even without a discoverable workflow")
+	if repo.Status.Configuration != model.ConfigExternalCI {
+		t.Fatalf("configuration = %q, want external-ci", repo.Status.Configuration)
 	}
-	if repo.Status.Freshness == model.FreshNever {
-		t.Fatalf("freshness = %q, want current; the repository was analyzed two hours ago",
-			repo.Status.Freshness)
+	if repo.Status.Overall != model.SeverityUnknown || repo.Status.Incomplete {
+		t.Fatalf("external CI must be explicit but not treated as failed evidence: %+v", repo.Status)
+	}
+	if repo.Execution.WorkflowPath != "" {
+		t.Fatalf("external CI key was treated as an Actions workflow: %q", repo.Execution.WorkflowPath)
+	}
+	if len(repo.Diagnostics) != 1 || repo.Diagnostics[0].Code != "external-ci-not-evaluated" {
+		t.Fatalf("external CI limitation is not explained: %+v", repo.Diagnostics)
+	}
+}
+
+func TestFailedAnalysisOutsideActionsDoesNotInventWorkflowHealth(t *testing.T) {
+	analysed := time.Now().Add(-2 * time.Hour)
+	client := buildClient(t, scenario{
+		name:         "external-ci-failed",
+		languages:    []string{"Go"},
+		defaultSetup: defaultSetup{State: "not-configured"},
+	})
+	client.set("repos/"+testOrg+"/external-ci-failed/code-scanning/analyses", []codeScanningAnalysis{
+		{Category: "/language:go", AnalysisKey: "jenkins-pipeline", CreatedAt: &analysed, Error: "database finalization failed"},
+	})
+
+	repo := findRepo(t, collect(t, client, defaultActivityOptions()), "external-ci-failed")
+
+	if repo.Status.Configuration != model.ConfigExternalCI || repo.Status.Overall != model.SeverityUnknown {
+		t.Fatalf("external analysis was misclassified as an Actions workflow: %+v", repo.Status)
 	}
 }

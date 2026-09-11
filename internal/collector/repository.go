@@ -632,6 +632,17 @@ func (c *Collector) evaluateAdvancedSetup(
 	} else {
 		repo.Status.Execution = model.ExecUnknown
 	}
+	// Advanced setup has no authoritative language-configuration endpoint.
+	// A current job proves the workflow selected that language even if it
+	// failed before uploading its first analysis.
+	for language, state := range languages {
+		if state.Analyzed && !state.Configured {
+			state.Configured = true
+			configured = append(configured, language)
+		}
+	}
+	sortLanguageSlice(configured)
+	repo.ConfiguredLanguages = configured
 
 	applyAnalyses(report, languages, evidence, repo.Execution.LatestCompletedRun)
 

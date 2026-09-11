@@ -428,6 +428,36 @@ func TestAdvancedSetupLanguageErrorSurvivesASuccessfulRun(t *testing.T) {
 	}
 }
 
+func TestAdvancedJobLanguageWithoutAnalysisIsConfiguredNotDeselected(t *testing.T) {
+	analysed := time.Now().Add(-time.Hour)
+	const workflow = ".github/workflows/codeql.yml"
+	client := buildClient(t, scenario{
+		name:         "advanced-first-failure",
+		languages:    []string{"Go", "Java"},
+		defaultSetup: defaultSetup{State: "not-configured"},
+		workflows:    advancedWorkflows(workflow),
+		runs:         map[string]any{"": runListFor(workflow, "failure", time.Hour)},
+		jobs:         jobsFor(map[string]string{"go": "success", "java-kotlin": "failure"}),
+	})
+	client.set("repos/"+testOrg+"/advanced-first-failure/code-scanning/analyses", []codeScanningAnalysis{
+		{Category: "/language:go", AnalysisKey: workflow + ":analyze", CreatedAt: &analysed},
+	})
+
+	repo := findRepo(t, collect(t, client, defaultActivityOptions()), "advanced-first-failure")
+
+	if !containsLanguage(repo.ConfiguredLanguages, model.LangJavaKotlin) ||
+		!containsLanguage(repo.FailedLanguages, model.LangJavaKotlin) ||
+		containsLanguage(repo.DeselectedLanguages, model.LangJavaKotlin) ||
+		containsLanguage(repo.MissingLanguages, model.LangJavaKotlin) {
+		t.Fatalf("advanced job language was classified with default-setup semantics: %+v", repo)
+	}
+	for _, diagnostic := range repo.Diagnostics {
+		if diagnostic.Code == "language-auto-deselected" {
+			t.Fatalf("advanced setup emitted a default-setup-only diagnostic: %+v", diagnostic)
+		}
+	}
+}
+
 // External CI analysis keys do not name an Actions workflow. Their categories
 // are free-form and can represent several applications in one repository, so
 // treating a recognized language category as complete repository coverage

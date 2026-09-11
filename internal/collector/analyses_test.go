@@ -14,6 +14,9 @@ func analysesFor(entries []codeScanningAnalysis, age time.Duration) []codeScanni
 	moment := time.Now().Add(-age)
 	for index := range entries {
 		entries[index].CreatedAt = &moment
+		if entries[index].AnalysisKey == "" {
+			entries[index].AnalysisKey = codeqlWorkflowPath + ":analyze"
+		}
 	}
 	return entries
 }

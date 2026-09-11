@@ -132,7 +132,7 @@ func (c *Collector) collectRepository(ctx context.Context, org string, source ap
 		// the workflow, which is the only way to find it: an advanced setup
 		// workflow has no fixed path.
 		if repo.Status.Configuration == model.ConfigNotConfigured {
-			report, err := c.collectAnalyses(ctx, org, source.Name, repo.DefaultBranch)
+			report, err := c.collectAnalyses(ctx, org, source.Name, repo.DefaultBranch, "")
 			if err != nil {
 				repo.Errors = append(repo.Errors, fmt.Sprintf("analyses: %v", err))
 				repo.Status.Configuration = model.ConfigUnknown
@@ -179,11 +179,11 @@ func (c *Collector) collectRepository(ctx context.Context, org string, source ap
 	// Analyses carry a per-language error field, which is the only stable API
 	// that explains why an individual language failed while the run as a whole
 	// reported success.
-	report, err := c.collectAnalyses(ctx, org, source.Name, repo.DefaultBranch)
+	report, err := c.collectAnalyses(ctx, org, source.Name, repo.DefaultBranch, codeqlWorkflowPath)
 	if err != nil {
 		repo.Errors = append(repo.Errors, fmt.Sprintf("analyses: %v", err))
 	}
-	applyAnalyses(report, languages, !evidence.jobsFailed)
+	applyAnalyses(report, languages, !evidence.jobsFailed && !evidence.jobsFound)
 
 	finalizeLanguages(&repo, languages)
 	repo.Status.Freshness = c.freshness(&repo)
@@ -218,6 +218,7 @@ func finalizeStatus(repo *model.Repo, hasWarning bool) {
 // with evidence that implies success.
 type evidenceState struct {
 	jobsFailed bool
+	jobsFound  bool
 }
 
 // repoContext carries organization-level data already gathered in bulk.
@@ -425,7 +426,10 @@ func isManagedWorkflowPath(path string) bool {
 //
 // Analyses are returned newest first, so the first entry seen for a language
 // is its current state.
-func (c *Collector) collectAnalyses(ctx context.Context, org, name, branch string) (*analysisReport, error) {
+func (c *Collector) collectAnalyses(
+	ctx context.Context,
+	org, name, branch, preferredSource string,
+) (*analysisReport, error) {
 	query := url.Values{}
 	query.Set("tool_name", "CodeQL")
 	query.Set("per_page", strconv.Itoa(analysisPageSize))
@@ -451,29 +455,56 @@ func (c *Collector) collectAnalyses(ctx context.Context, org, name, branch strin
 		return nil, nil
 	}
 
-	report := &analysisReport{Languages: map[model.Language]*analysisSummary{}}
-
-	// The newest analysis names the workflow currently producing results,
-	// which is how an advanced setup workflow is found. Everything else is
-	// then read from that workflow only: a repository can carry analyses from
-	// more than one CodeQL workflow, and letting a different one supply
-	// freshness, success or an error would attribute another workflow's
-	// results to the one being assessed.
+	// Select a code-scanning source before grouping languages. Other managed
+	// products, such as Code Quality, also emit CodeQL records under dynamic/
+	// keys and must not hide the actual code-scanning workflow. When discovery
+	// is needed, prefer an Actions workflow we can evaluate over external CI.
+	var selected string
+	var external string
 	for index := range analyses {
 		if analyses[index].CreatedAt == nil {
 			continue
 		}
-		report.Newest = analyses[index].CreatedAt
-		report.SourceKey = sourceKeyFromAnalysisKey(analyses[index].AnalysisKey)
-		report.WorkflowPath = actionsWorkflowPath(report.SourceKey)
-		report.DefaultSetup = report.SourceKey == codeqlWorkflowPath
-		break
+		source := sourceKeyFromAnalysisKey(analyses[index].AnalysisKey)
+		if preferredSource != "" {
+			if source == preferredSource {
+				selected = source
+				break
+			}
+			continue
+		}
+		if isManagedWorkflowPath(source) {
+			continue
+		}
+		if actionsWorkflowPath(source) != "" {
+			selected = source
+			break
+		}
+		if external == "" {
+			external = source
+		}
+	}
+	if selected == "" {
+		selected = external
+	}
+	if selected == "" {
+		return nil, nil
+	}
+
+	report := &analysisReport{
+		Languages:    map[model.Language]*analysisSummary{},
+		SourceKey:    selected,
+		WorkflowPath: actionsWorkflowPath(selected),
+		DefaultSetup: selected == codeqlWorkflowPath,
 	}
 
 	for index := range analyses {
 		analysis := &analyses[index]
 		if sourceKeyFromAnalysisKey(analysis.AnalysisKey) != report.SourceKey {
 			continue
+		}
+		if report.Newest == nil && analysis.CreatedAt != nil {
+			report.Newest = analysis.CreatedAt
 		}
 
 		match := analysisCategoryPattern.FindStringSubmatch(analysis.Category)
@@ -577,7 +608,7 @@ func (c *Collector) evaluateAdvancedSetup(
 		repo.Status.Execution = model.ExecUnknown
 	}
 
-	applyAnalyses(report, languages, !evidence.jobsFailed)
+	applyAnalyses(report, languages, !evidence.jobsFailed && !evidence.jobsFound)
 
 	finalizeLanguages(repo, languages)
 	repo.Status.Freshness = c.freshness(repo)
@@ -725,6 +756,7 @@ func (c *Collector) collectJobs(
 			continue
 		}
 		state := languages.Get(language)
+		evidence.jobsFound = true
 		state.Analyzed = true
 		state.JobConclusion = item.Conclusion
 		state.JobURL = item.HTMLURL

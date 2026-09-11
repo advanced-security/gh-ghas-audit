@@ -83,6 +83,37 @@ func TestUnreadableJobsPreventAnalysisFromClaimingSuccess(t *testing.T) {
 	}
 }
 
+func TestCurrentJobsPreventHistoricalAnalysisFromClaimingMissingLanguageSuccess(t *testing.T) {
+	recent := time.Now().Add(-time.Hour)
+	old := time.Now().Add(-30 * 24 * time.Hour)
+	client := buildClient(t, scenario{
+		name:      "job-omitted-language",
+		languages: []string{"Go", "Python"},
+		defaultSetup: defaultSetup{
+			State:     "configured",
+			Languages: []string{"go", "python"},
+		},
+		workflows: codeqlWorkflows(),
+		runs:      map[string]any{"": runList("success", time.Hour)},
+		jobs:      jobsFor(map[string]string{"go": "success"}),
+	})
+	client.set("repos/"+testOrg+"/job-omitted-language/code-scanning/analyses", []codeScanningAnalysis{
+		{Category: "/language:go", AnalysisKey: codeqlWorkflowPath + ":analyze", CreatedAt: &recent},
+		{Category: "/language:python", AnalysisKey: codeqlWorkflowPath + ":analyze", CreatedAt: &old},
+	})
+
+	repo := findRepo(t, collect(t, client, defaultActivityOptions()), "job-omitted-language")
+
+	if containsLanguage(repo.SucceededLanguages, model.LangPython) {
+		t.Fatal("historical Python analysis masked its absence from the latest run")
+	}
+	if !containsLanguage(repo.FailedLanguages, model.LangPython) ||
+		repo.Status.Coverage != model.CoveragePartial ||
+		repo.Status.Overall != model.SeverityDegraded {
+		t.Fatalf("missing latest-run language was not degraded: %+v", repo)
+	}
+}
+
 // A failed analyses request is not an absence of findings. Swallowing it would
 // let a token without the right permission produce a clean bill of health.
 func TestUnreadableAnalysesAreRecordedNotIgnored(t *testing.T) {
@@ -164,6 +195,55 @@ func TestCodeQualityWorkflowIsNotReadAsAdvancedSetup(t *testing.T) {
 
 	if repo.Status.Configuration == model.ConfigAdvancedSetup {
 		t.Fatal("a code quality workflow must not be reported as code scanning advanced setup")
+	}
+}
+
+func TestNewerCodeQualityAnalysisDoesNotHideAdvancedCodeScanning(t *testing.T) {
+	recent := time.Now().Add(-time.Hour)
+	older := time.Now().Add(-2 * time.Hour)
+	const workflow = ".github/workflows/codeql.yml"
+	client := buildClient(t, scenario{
+		name:         "quality-before-scanning",
+		languages:    []string{"Go"},
+		defaultSetup: defaultSetup{State: "not-configured"},
+		workflows:    advancedWorkflows(workflow),
+		runs:         map[string]any{"": runListFor(workflow, "success", time.Hour)},
+		jobs:         jobsFor(map[string]string{"go": "success"}),
+	})
+	client.set("repos/"+testOrg+"/quality-before-scanning/code-scanning/analyses", []codeScanningAnalysis{
+		{Category: "/language:go", AnalysisKey: "dynamic/github-code-quality/codeql:analyze", CreatedAt: &recent},
+		{Category: "/language:go", AnalysisKey: workflow + ":analyze", CreatedAt: &older},
+	})
+
+	repo := findRepo(t, collect(t, client, defaultActivityOptions()), "quality-before-scanning")
+
+	if repo.Status.Configuration != model.ConfigAdvancedSetup ||
+		repo.Execution.WorkflowPath != workflow ||
+		repo.Status.Overall != model.SeverityHealthy {
+		t.Fatalf("newer Code Quality record hid advanced code scanning: %+v", repo)
+	}
+}
+
+func TestConfiguredDefaultSetupSelectsItsOwnAnalyses(t *testing.T) {
+	recent := time.Now().Add(-time.Hour)
+	older := time.Now().Add(-2 * time.Hour)
+	client := buildClient(t, scenario{
+		name:         "default-with-other-codeql",
+		languages:    []string{"Go"},
+		defaultSetup: defaultSetup{State: "configured", Languages: []string{"go"}},
+		workflows:    codeqlWorkflows(),
+		runs:         map[string]any{"": runList("success", time.Hour)},
+		jobs:         jobsFor(map[string]string{"go": "success"}),
+	})
+	client.set("repos/"+testOrg+"/default-with-other-codeql/code-scanning/analyses", []codeScanningAnalysis{
+		{Category: "/language:go", AnalysisKey: ".github/workflows/other.yml:analyze", CreatedAt: &recent, Error: "other workflow failed"},
+		{Category: "/language:go", AnalysisKey: codeqlWorkflowPath + ":analyze", CreatedAt: &older},
+	})
+
+	repo := findRepo(t, collect(t, client, defaultActivityOptions()), "default-with-other-codeql")
+
+	if repo.Status.Overall != model.SeverityHealthy {
+		t.Fatalf("another workflow's analysis was attributed to default setup: %+v", repo)
 	}
 }
 

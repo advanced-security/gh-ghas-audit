@@ -1,6 +1,8 @@
 package collector
 
 import (
+	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -8,6 +10,33 @@ import (
 	"github.com/advanced-security/gh-ghas-audit/v2/internal/ghapi"
 	"github.com/advanced-security/gh-ghas-audit/v2/internal/model"
 )
+
+type pagedAnalysesClient struct {
+	*fakeClient
+	pages     [][]codeScanningAnalysis
+	paginated bool
+}
+
+func (client *pagedAnalysesClient) GetPaginatedJSON(
+	ctx context.Context,
+	path string,
+	collect func([]byte) error,
+) error {
+	if !strings.Contains(path, "/code-scanning/analyses?") {
+		return client.fakeClient.GetPaginatedJSON(ctx, path, collect)
+	}
+	client.paginated = true
+	for _, page := range client.pages {
+		data, err := json.Marshal(page)
+		if err != nil {
+			return err
+		}
+		if err := collect(data); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 // A language removed from default setup months ago still has old analyses
 // inside the page this tool reads. Those must not be mistaken for the language
@@ -221,6 +250,64 @@ func TestNewerCodeQualityAnalysisDoesNotHideAdvancedCodeScanning(t *testing.T) {
 		repo.Execution.WorkflowPath != workflow ||
 		repo.Status.Overall != model.SeverityHealthy {
 		t.Fatalf("newer Code Quality record hid advanced code scanning: %+v", repo)
+	}
+}
+
+func TestLaterAnalysisPagesCanIdentifyAdvancedCodeScanning(t *testing.T) {
+	recent := time.Now().Add(-time.Hour)
+	older := time.Now().Add(-2 * time.Hour)
+	const workflow = ".github/workflows/codeql.yml"
+	base := buildClient(t, scenario{
+		name:         "paged-analyses",
+		languages:    []string{"Java"},
+		defaultSetup: defaultSetup{State: "not-configured"},
+		workflows:    advancedWorkflows(workflow),
+		runs:         map[string]any{"": runListFor(workflow, "success", time.Hour)},
+		jobs:         jobsFor(map[string]string{"java-kotlin": "success"}),
+	})
+	first := make([]codeScanningAnalysis, analysisPageSize)
+	for index := range first {
+		first[index] = codeScanningAnalysis{
+			Category:    "/language:java-kotlin",
+			AnalysisKey: "dynamic/github-code-quality/codeql:analyze",
+			CreatedAt:   &recent,
+		}
+	}
+	client := &pagedAnalysesClient{
+		fakeClient: base,
+		pages: [][]codeScanningAnalysis{first, {{
+			Category:    "/language:java-kotlin",
+			AnalysisKey: workflow + ":analyze",
+			CreatedAt:   &older,
+			Error:       "analysis failed",
+		}}},
+	}
+
+	repo := findRepo(t, collect(t, client, defaultActivityOptions()), "paged-analyses")
+
+	if !client.paginated || repo.Status.Configuration != model.ConfigAdvancedSetup ||
+		repo.Execution.WorkflowPath != workflow ||
+		!containsLanguage(repo.FailedLanguages, model.LangJavaKotlin) ||
+		repo.Status.Overall != model.SeverityDegraded {
+		t.Fatalf("later analysis page was not evaluated: paginated=%v repo=%+v", client.paginated, repo)
+	}
+}
+
+func TestCustomCategoryContainingLanguageTextIsIgnored(t *testing.T) {
+	analysed := time.Now().Add(-time.Hour)
+	client := buildClient(t, scenario{
+		name:         "custom-category",
+		languages:    []string{"Go"},
+		defaultSetup: defaultSetup{State: "not-configured"},
+	})
+	client.set("repos/"+testOrg+"/custom-category/code-scanning/analyses", []codeScanningAnalysis{
+		{Category: "mylanguage:go", AnalysisKey: "external-ci", CreatedAt: &analysed},
+	})
+
+	repo := findRepo(t, collect(t, client, defaultActivityOptions()), "custom-category")
+
+	if repo.Status.Configuration != model.ConfigExternalCI || len(repo.ConfiguredLanguages) != 0 {
+		t.Fatalf("free-form category invented Go coverage: %+v", repo)
 	}
 }
 

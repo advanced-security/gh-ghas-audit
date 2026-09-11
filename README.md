@@ -163,7 +163,7 @@ Each language records `runtime_evaluation`: `not-evaluated`, `evaluated` or `inc
 | `--deep-diagnostics-max-repos` | `200` | Maximum repositories inspected for logs |
 | `--deep-diagnostics-max-mb` | `32` | Total compressed log download budget in MiB |
 
-Inventory uses one GraphQL query per 50 repositories. Runtime evidence requires per-repository REST calls. ETag revalidation saves primary quota but still makes network requests. Large organizations are batch workloads: use scope filters, caching and suitable API quotas.
+Inventory uses one GraphQL query per 50 repositories. Runtime evidence requires per-repository REST calls; repositories with more than 100 CodeQL analysis records require additional paginated requests. ETag revalidation saves primary quota but still makes network requests. Large organizations are batch workloads: use scope filters, caching and suitable API quotas.
 
 REST throttling honours `Retry-After` and reset headers. Recorded waits appear in `stats.rate_limit_waits`. Increasing concurrency can trigger secondary limits.
 

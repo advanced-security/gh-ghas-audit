@@ -387,7 +387,7 @@ type analysisReport struct {
 // analysisCategoryPattern extracts the language from an analysis category such
 // as "/language:java-kotlin". Categories are free-form for third-party tools,
 // so anything that does not match this shape is ignored rather than guessed at.
-var analysisCategoryPattern = regexp.MustCompile(`(?i)language:([a-z0-9_+-]+)`)
+var analysisCategoryPattern = regexp.MustCompile(`(?i)(?:^|/)language:([a-z0-9_+-]+)(?:/|$)`)
 
 // sourceKeyFromAnalysisKey returns the configuration portion of an analysis
 // key. Actions uses "<workflow path>:<job name>"; external CI keys are
@@ -442,7 +442,14 @@ func (c *Collector) collectAnalyses(
 		url.PathEscape(org), url.PathEscape(name), query.Encode())
 
 	var analyses []codeScanningAnalysis
-	if err := c.client.GetJSON(ctx, path, &analyses); err != nil {
+	if err := c.client.GetPaginatedJSON(ctx, path, func(page []byte) error {
+		var next []codeScanningAnalysis
+		if err := json.Unmarshal(page, &next); err != nil {
+			return err
+		}
+		analyses = append(analyses, next...)
+		return nil
+	}); err != nil {
 		// A repository that has never run code scanning returns 404, which is
 		// a real answer. Anything else, including a missing permission or an
 		// exhausted rate limit, means the evidence was not read and must not

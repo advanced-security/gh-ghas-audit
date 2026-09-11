@@ -303,7 +303,7 @@ func unsupportedLanguages(source apiRepository) []string {
 var nonSourceLanguages = map[string]bool{
 	"html": true, "css": true, "scss": true, "sass": true, "less": true,
 	"dockerfile": true, "makefile": true, "cmake": true,
-	"batchfile": true, "yaml": true, "json": true,
+	"yaml": true, "json": true,
 	"xml": true, "markdown": true, "text": true, "vim script": true,
 	"jinja": true, "handlebars": true, "mustache": true, "smarty": true,
 	"procfile": true, "editorconfig": true, "gnuplot": true, "roff": true,
@@ -716,6 +716,20 @@ func (c *Collector) collectExecution(
 		}
 		if latestSuccessful == nil && strings.EqualFold(run.Conclusion, "success") {
 			latestSuccessful = run
+		}
+	}
+
+	if latestCompleted == nil {
+		completedRuns, err := c.fetchRuns(ctx, org, name, workflowID, branch, "completed", 1)
+		if err != nil {
+			repo.Errors = append(repo.Errors, fmt.Sprintf("completed workflow runs: %v", err))
+		} else {
+			for index := range completedRuns {
+				if strings.EqualFold(completedRuns[index].Status, "completed") {
+					latestCompleted = &completedRuns[index]
+					break
+				}
+			}
 		}
 	}
 

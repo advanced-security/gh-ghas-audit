@@ -413,3 +413,30 @@ func PropertyColumns(report *model.Report) []string {
 	sort.Strings(names)
 	return names
 }
+
+// ResolvePropertyColumns maps requested property names to the canonical
+// spelling returned by the organization while preserving requested names that
+// are absent from every collected repository.
+func ResolvePropertyColumns(report *model.Report, requested []string) []string {
+	if len(requested) == 0 {
+		return PropertyColumns(report)
+	}
+	available := PropertyColumns(report)
+	resolved := make([]string, 0, len(requested))
+	seen := map[string]bool{}
+	for _, name := range requested {
+		canonical := name
+		for _, candidate := range available {
+			if strings.EqualFold(candidate, name) {
+				canonical = candidate
+				break
+			}
+		}
+		key := strings.ToLower(canonical)
+		if !seen[key] {
+			seen[key] = true
+			resolved = append(resolved, canonical)
+		}
+	}
+	return resolved
+}

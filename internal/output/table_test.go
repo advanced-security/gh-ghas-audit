@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -140,5 +141,16 @@ func TestLastScanCellPreservesUnknownFreshness(t *testing.T) {
 		if got := lastScanCell(repo); got != test.want {
 			t.Errorf("freshness %s rendered as %q, want %q", test.freshness, got, test.want)
 		}
+	}
+}
+
+func TestResolvePropertyColumnsUsesOrganizationSpelling(t *testing.T) {
+	report := &model.Report{Repositories: []model.Repo{
+		{Properties: map[string]string{"Project": "A", "Service Tier": "1"}},
+	}}
+	got := ResolvePropertyColumns(report, []string{"project", "SERVICE TIER", "Missing", "PROJECT"})
+	want := []string{"Project", "Service Tier", "Missing"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("resolved columns = %v, want %v", got, want)
 	}
 }

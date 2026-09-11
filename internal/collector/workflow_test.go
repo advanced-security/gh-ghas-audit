@@ -155,3 +155,36 @@ func TestDisabledAdvancedWorkflowIsStalledRatherThanStale(t *testing.T) {
 		t.Fatal("disabled workflow lost its historical run evidence")
 	}
 }
+
+func TestQueuedRecentPageStillFindsOlderCompletedFailure(t *testing.T) {
+	now := time.Now()
+	recent := workflowRunList{TotalCount: runPageSize}
+	for index := 0; index < runPageSize; index++ {
+		recent.WorkflowRun = append(recent.WorkflowRun, workflowRun{
+			ID: int64(100 + index), Status: "queued", HeadBranch: "main",
+			CreatedAt: &now, UpdatedAt: &now,
+		})
+	}
+	failedAt := now.Add(-time.Hour)
+	completed := workflowRunList{TotalCount: 1, WorkflowRun: []workflowRun{{
+		ID: 42, Status: "completed", Conclusion: "failure", HeadBranch: "main",
+		CreatedAt: &failedAt, UpdatedAt: &failedAt,
+	}}}
+	client := buildClient(t, scenario{
+		name:         "queued-after-failure",
+		languages:    []string{"Go"},
+		defaultSetup: defaultSetup{State: "configured", Languages: []string{"go"}},
+		workflows:    codeqlWorkflows(),
+		runs:         map[string]any{"": recent},
+		jobs:         jobsFor(map[string]string{"go": "failure"}),
+	})
+	client.set("repos/"+testOrg+"/queued-after-failure/actions/workflows/99/runs?branch=main&exclude_pull_requests=true&per_page=1&status=completed", completed)
+
+	repo := findRepo(t, collect(t, client, defaultActivityOptions()), "queued-after-failure")
+
+	if repo.Execution.LatestRun == nil || repo.Execution.LatestRun.Status != "queued" ||
+		repo.Execution.LatestCompletedRun == nil || repo.Execution.LatestCompletedRun.ID != 42 ||
+		repo.Status.Execution != model.ExecFailure || repo.Status.Overall != model.SeverityFailing {
+		t.Fatalf("bounded recent page hid the completed failure: %+v", repo)
+	}
+}

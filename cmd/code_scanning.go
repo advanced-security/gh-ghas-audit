@@ -538,10 +538,7 @@ func (opts *codeScanningOptions) writeReport(cmd *cobra.Command, report *model.R
 		tableProperties = append(append([]string(nil), tableProperties...), opts.groupByProperty)
 	}
 
-	fileProperties := opts.properties
-	if len(fileProperties) == 0 {
-		fileProperties = output.PropertyColumns(report)
-	}
+	fileProperties := output.ResolvePropertyColumns(report, opts.properties)
 
 	switch format {
 	case output.FormatJSON:

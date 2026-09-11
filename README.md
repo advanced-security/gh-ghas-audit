@@ -68,6 +68,7 @@ gh ghas-audit code-scanning -o my-org --scan-depth diagnostics --deep-scope prob
 Scope filters run before per-repository collection. `--status`, `--language` and `--activity` are **display filters**: they do not reduce requests or log downloads.
 
 Property names are case-insensitive. Multi-select properties match any value.
+Property values containing literal commas cannot currently be filtered unambiguously.
 
 ```bash
 gh ghas-audit code-scanning -o my-org --property-filter Project=WUPH --group-by-property Project

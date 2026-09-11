@@ -143,6 +143,33 @@ func TestCurrentJobsPreventHistoricalAnalysisFromClaimingMissingLanguageSuccess(
 	}
 }
 
+func TestNewerAnalysisCanSupplementStaleJobEvidence(t *testing.T) {
+	recent := time.Now().Add(-time.Hour)
+	client := buildClient(t, scenario{
+		name:      "newer-than-run",
+		languages: []string{"Go"},
+		defaultSetup: defaultSetup{
+			State:     "configured",
+			Languages: []string{"actions", "go"},
+		},
+		workflows: codeqlWorkflows(),
+		runs:      map[string]any{"": runList("success", 30*24*time.Hour)},
+		jobs:      jobsFor(map[string]string{"go": "success"}),
+	})
+	client.set("repos/"+testOrg+"/newer-than-run/code-scanning/analyses", []codeScanningAnalysis{
+		{Category: "/language:actions", AnalysisKey: codeqlWorkflowPath + ":analyze", CreatedAt: &recent},
+		{Category: "/language:go", AnalysisKey: codeqlWorkflowPath + ":analyze", CreatedAt: &recent},
+	})
+
+	repo := findRepo(t, collect(t, client, defaultActivityOptions()), "newer-than-run")
+
+	if !containsLanguage(repo.SucceededLanguages, model.LangActions) ||
+		repo.Status.Coverage != model.CoverageComplete ||
+		repo.Status.Overall != model.SeverityHealthy {
+		t.Fatalf("newer analyses were hidden by stale jobs: %+v", repo)
+	}
+}
+
 // A failed analyses request is not an absence of findings. Swallowing it would
 // let a token without the right permission produce a clean bill of health.
 func TestUnreadableAnalysesAreRecordedNotIgnored(t *testing.T) {
@@ -250,6 +277,32 @@ func TestNewerCodeQualityAnalysisDoesNotHideAdvancedCodeScanning(t *testing.T) {
 		repo.Execution.WorkflowPath != workflow ||
 		repo.Status.Overall != model.SeverityHealthy {
 		t.Fatalf("newer Code Quality record hid advanced code scanning: %+v", repo)
+	}
+}
+
+func TestNewerExternalCIMigrationIsNotReplacedByRetiredActionsWorkflow(t *testing.T) {
+	recent := time.Now().Add(-time.Hour)
+	older := time.Now().Add(-30 * 24 * time.Hour)
+	const retired = ".github/workflows/codeql.yml"
+	client := buildClient(t, scenario{
+		name:         "migrated-external",
+		languages:    []string{"Go"},
+		defaultSetup: defaultSetup{State: "not-configured"},
+		workflows:    advancedWorkflows(retired),
+		runs:         map[string]any{"": runListFor(retired, "success", 30*24*time.Hour)},
+		jobs:         jobsFor(map[string]string{"go": "success"}),
+	})
+	client.set("repos/"+testOrg+"/migrated-external/code-scanning/analyses", []codeScanningAnalysis{
+		{Category: "/language:go", AnalysisKey: "jenkins-pipeline", CreatedAt: &recent},
+		{Category: "/language:go", AnalysisKey: retired + ":analyze", CreatedAt: &older},
+	})
+
+	repo := findRepo(t, collect(t, client, defaultActivityOptions()), "migrated-external")
+
+	if repo.Status.Configuration != model.ConfigExternalCI ||
+		repo.Status.Overall != model.SeverityUnknown ||
+		repo.Execution.WorkflowPath != "" {
+		t.Fatalf("retired Actions workflow replaced the newer external source: %+v", repo)
 	}
 }
 

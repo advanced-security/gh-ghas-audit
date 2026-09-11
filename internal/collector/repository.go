@@ -183,7 +183,7 @@ func (c *Collector) collectRepository(ctx context.Context, org string, source ap
 	if err != nil {
 		repo.Errors = append(repo.Errors, fmt.Sprintf("analyses: %v", err))
 	}
-	applyAnalyses(report, languages, !evidence.jobsFailed && !evidence.jobsFound)
+	applyAnalyses(report, languages, evidence, repo.Execution.LatestCompletedRun)
 
 	finalizeLanguages(&repo, languages)
 	repo.Status.Freshness = c.freshness(&repo)
@@ -463,12 +463,11 @@ func (c *Collector) collectAnalyses(
 		return nil, nil
 	}
 
-	// Select a code-scanning source before grouping languages. Other managed
-	// products, such as Code Quality, also emit CodeQL records under dynamic/
-	// keys and must not hide the actual code-scanning workflow. When discovery
-	// is needed, prefer an Actions workflow we can evaluate over external CI.
+	// Select the newest code-scanning source before grouping languages. Other
+	// managed products, such as Code Quality, also emit CodeQL records under
+	// dynamic/ keys and must be skipped without changing newest-first ordering
+	// between supported Actions workflows and detected external CI.
 	var selected string
-	var external string
 	for index := range analyses {
 		if analyses[index].CreatedAt == nil {
 			continue
@@ -484,16 +483,8 @@ func (c *Collector) collectAnalyses(
 		if isManagedWorkflowPath(source) {
 			continue
 		}
-		if actionsWorkflowPath(source) != "" {
-			selected = source
-			break
-		}
-		if external == "" {
-			external = source
-		}
-	}
-	if selected == "" {
-		selected = external
+		selected = source
+		break
 	}
 	if selected == "" {
 		return nil, nil
@@ -553,7 +544,12 @@ func (c *Collector) collectAnalyses(
 // after failing from one that was never enabled. Analyses cover months of
 // history, so setting it here would report a language removed long ago as
 // having just been silently dropped.
-func applyAnalyses(report *analysisReport, languages model.LanguageSet, trustSuccess bool) {
+func applyAnalyses(
+	report *analysisReport,
+	languages model.LanguageSet,
+	evidence *evidenceState,
+	latestCompleted *model.RunRef,
+) {
 	if report == nil {
 		return
 	}
@@ -571,10 +567,31 @@ func applyAnalyses(report *analysisReport, languages model.LanguageSet, trustSuc
 			continue
 		}
 
-		if trustSuccess && !state.Analyzed {
+		if analysisCanProveSuccess(summary, evidence, latestCompleted) && !state.Analyzed {
 			state.Succeeded = true
 		}
 	}
+}
+
+func analysisCanProveSuccess(
+	summary *analysisSummary,
+	evidence *evidenceState,
+	latestCompleted *model.RunRef,
+) bool {
+	if evidence.jobsFailed {
+		return false
+	}
+	if !evidence.jobsFound {
+		return true
+	}
+	var runTime *time.Time
+	if latestCompleted != nil {
+		runTime = latestCompleted.UpdatedAt
+		if runTime == nil {
+			runTime = latestCompleted.StartedAt
+		}
+	}
+	return summary.CreatedAt != nil && runTime != nil && summary.CreatedAt.After(*runTime)
 }
 
 // evaluateAdvancedSetup assesses a repository that scans from a workflow it
@@ -616,7 +633,7 @@ func (c *Collector) evaluateAdvancedSetup(
 		repo.Status.Execution = model.ExecUnknown
 	}
 
-	applyAnalyses(report, languages, !evidence.jobsFailed && !evidence.jobsFound)
+	applyAnalyses(report, languages, evidence, repo.Execution.LatestCompletedRun)
 
 	finalizeLanguages(repo, languages)
 	repo.Status.Freshness = c.freshness(repo)

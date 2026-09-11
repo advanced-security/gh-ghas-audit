@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -324,6 +325,36 @@ func collect(t *testing.T, client Client, options Options) *model.Report {
 		t.Fatalf("Collect returned an error: %v", err)
 	}
 	return report
+}
+
+func TestOrganizationScopesAreDeduplicatedCaseInsensitively(t *testing.T) {
+	client := newFakeClient()
+	client.graphql = func(query string, _ map[string]any, out any) error {
+		if !strings.Contains(query, "enterprise(slug") {
+			return fmt.Errorf("unexpected query")
+		}
+		payload := map[string]any{"enterprise": map[string]any{"organizations": map[string]any{
+			"pageInfo": map[string]any{"hasNextPage": false, "endCursor": ""},
+			"nodes":    []map[string]string{{"login": "acme"}, {"login": "Other"}},
+		}}}
+		data, err := json.Marshal(payload)
+		if err != nil {
+			return err
+		}
+		return json.Unmarshal(data, out)
+	}
+	collector := New(client, Options{
+		Organizations: []string{"ACME", "other", "Acme"},
+		Enterprise:    "enterprise",
+	})
+	organizations, err := collector.resolveOrganizations(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"ACME", "other"}
+	if !reflect.DeepEqual(organizations, want) {
+		t.Fatalf("organizations = %v, want first-spelling deduplicated %v", organizations, want)
+	}
 }
 
 func findRepo(t *testing.T, report *model.Report, name string) model.Repo {

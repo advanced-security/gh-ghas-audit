@@ -58,7 +58,7 @@ func (c *Collector) collectRepository(ctx context.Context, org string, source ap
 		Properties:     extra.Properties,
 		// Failures recorded while enumerating carry through, so a truncated
 		// language list is never presented as complete evidence.
-		Errors: append([]string(nil), source.InventoryErrors...),
+		Errors: append(append([]string(nil), source.InventoryErrors...), extra.Errors...),
 	}
 	if repo.URL == "" {
 		repo.URL = fmt.Sprintf("https://%s/%s/%s", c.client.Host(), org, source.Name)
@@ -226,6 +226,7 @@ type repoContext struct {
 	Properties        map[string]string
 	ConfigurationName string
 	AttachmentStatus  string
+	Errors            []string
 }
 
 func featureUnavailable(err error, archived bool) bool {

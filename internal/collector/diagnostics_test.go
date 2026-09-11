@@ -21,6 +21,42 @@ func (c cleanLogs) GetBytesLimited(context.Context, string, int64) ([]byte, erro
 	return c.archive, nil
 }
 
+type truncatedLogs struct{}
+
+func (truncatedLogs) Inspect(context.Context, string, string, int64) ([]model.Diagnostic, error) {
+	return []model.Diagnostic{{
+		Source: model.SourceLog, Severity: "warning", Code: "low-quality-scan",
+		Message: "low analysis quality",
+	}}, diagnostics.ErrDiagnosticsTruncated
+}
+
+func TestTruncatedDiagnosticsRetainWarningsAndMarkIncomplete(t *testing.T) {
+	client := buildClient(t, scenario{
+		name:         "truncated",
+		languages:    []string{"Go"},
+		defaultSetup: defaultSetup{State: "configured", Languages: []string{"go"}},
+		workflows:    codeqlWorkflows(),
+		runs:         map[string]any{"": runList("success", time.Hour)},
+		jobs:         jobsFor(map[string]string{"go": "success"}),
+		databases:    databasesFor([]string{"go"}, time.Hour),
+	})
+	options := defaultActivityOptions()
+	options.Depth = DepthDiagnostics
+	options.DeepDiagnostics = DeepDiagnosticsAll
+	options.LogFetcher = truncatedLogs{}
+
+	report := collect(t, client, options)
+	repo := findRepo(t, report, "truncated")
+
+	if !repo.Status.Incomplete || !report.Stats.Incomplete || repo.Status.Overall != model.SeverityDegraded {
+		t.Fatalf("truncated warnings were hidden: repo=%+v report=%+v", repo.Status, report.Stats)
+	}
+	if len(repo.Diagnostics) != 1 || repo.Diagnostics[0].Code != "low-quality-scan" ||
+		!strings.Contains(strings.Join(repo.Errors, " "), "retention limit") {
+		t.Fatalf("partial diagnostic evidence was lost: %+v", repo)
+	}
+}
+
 func TestDiagnosticsBudgetMarksSkippedRepositoryIncomplete(t *testing.T) {
 	scenarios := make([]scenario, 2)
 	for index, name := range []string{"one", "two"} {

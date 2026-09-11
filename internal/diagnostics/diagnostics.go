@@ -252,6 +252,11 @@ type logClient interface {
 // ErrBudgetExhausted distinguishes an uninspected archive from a clean one.
 var ErrBudgetExhausted = errors.New("log inspection budget exhausted")
 
+// ErrDiagnosticsTruncated means the archive contained more unique findings
+// than the report retains. The inspection is incomplete even though the most
+// important findings are preserved.
+var ErrDiagnosticsTruncated = errors.New("log diagnostics exceeded retention limit")
+
 // Limits bounds the work a diagnostic pass may perform.
 type Limits struct {
 	// MaxRepositories caps how many repositories are inspected.
@@ -384,13 +389,9 @@ func Scan(archive []byte, runURL string, maxExcerpt int) ([]model.Diagnostic, er
 		return nil, fmt.Errorf("reading log archive: %w", err)
 	}
 
-	seen := map[string]bool{}
-	var diagnostics []model.Diagnostic
+	retained := &diagnosticRetention{seen: map[string]bool{}}
 
 	for _, file := range reader.File {
-		if len(diagnostics) >= maxDiagnosticsPerRun {
-			break
-		}
 		if file.FileInfo().IsDir() || !strings.HasSuffix(strings.ToLower(file.Name), ".txt") {
 			continue
 		}
@@ -398,20 +399,50 @@ func Scan(archive []byte, runURL string, maxExcerpt int) ([]model.Diagnostic, er
 
 		opened, err := file.Open()
 		if err != nil {
-			return diagnostics, fmt.Errorf("opening log %q: %w", file.Name, err)
+			return retained.diagnostics, fmt.Errorf("opening log %q: %w", file.Name, err)
 		}
-		found, scanErr := scanStream(opened, language, runURL, maxExcerpt, seen, len(diagnostics))
+		scanErr := scanStream(opened, language, runURL, maxExcerpt, retained)
 		closeErr := opened.Close()
-		diagnostics = append(diagnostics, found...)
 		if scanErr != nil {
-			return diagnostics, fmt.Errorf("reading log %q: %w", file.Name, scanErr)
+			return retained.diagnostics, fmt.Errorf("reading log %q: %w", file.Name, scanErr)
 		}
 		if closeErr != nil {
-			return diagnostics, fmt.Errorf("closing log %q: %w", file.Name, closeErr)
+			return retained.diagnostics, fmt.Errorf("closing log %q: %w", file.Name, closeErr)
 		}
 	}
 
-	return diagnostics, nil
+	if retained.truncated {
+		return retained.diagnostics, fmt.Errorf("%w: retained %d findings",
+			ErrDiagnosticsTruncated, maxDiagnosticsPerRun)
+	}
+	return retained.diagnostics, nil
+}
+
+type diagnosticRetention struct {
+	seen        map[string]bool
+	diagnostics []model.Diagnostic
+	truncated   bool
+}
+
+func (retained *diagnosticRetention) add(key string, diagnostic model.Diagnostic) {
+	if retained.seen[key] {
+		return
+	}
+	retained.seen[key] = true
+	if len(retained.diagnostics) < maxDiagnosticsPerRun {
+		retained.diagnostics = append(retained.diagnostics, diagnostic)
+		return
+	}
+	retained.truncated = true
+	if diagnostic.Severity != severityWarning && diagnostic.Severity != severityError {
+		return
+	}
+	for index := len(retained.diagnostics) - 1; index >= 0; index-- {
+		if retained.diagnostics[index].Severity == severityInfo {
+			retained.diagnostics[index] = diagnostic
+			return
+		}
+	}
 }
 
 func scanStream(
@@ -419,10 +450,8 @@ func scanStream(
 	language model.Language,
 	runURL string,
 	maxExcerpt int,
-	seen map[string]bool,
-	already int,
-) ([]model.Diagnostic, error) {
-	var diagnostics []model.Diagnostic
+	retained *diagnosticRetention,
+) error {
 
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 0, 64*1024), maxLineLength)
@@ -442,27 +471,21 @@ func scanStream(
 		}
 
 		key := string(language) + "|group|" + groupTitle
-		if !seen[key] {
-			seen[key] = true
-			diagnostics = append(diagnostics, model.Diagnostic{
-				Source:   model.SourceLog,
-				Severity: severity,
-				Code:     code,
-				Language: language,
-				// The title is the same heading the tool status page shows.
-				Message: groupTitle,
-				Excerpt: truncate(body, maxExcerpt),
-				URL:     runURL,
-			})
-		}
+		retained.add(key, model.Diagnostic{
+			Source:   model.SourceLog,
+			Severity: severity,
+			Code:     code,
+			Language: language,
+			// The title is the same heading the tool status page shows.
+			Message: groupTitle,
+			Excerpt: truncate(body, maxExcerpt),
+			URL:     runURL,
+		})
 		groupTitle = ""
 		groupBody = nil
 	}
 
 	for scanner.Scan() {
-		if already+len(diagnostics) >= maxDiagnosticsPerRun {
-			break
-		}
 		line := scanner.Text()
 
 		// CodeQL diagnostic blocks carry the tool status page content, so they
@@ -497,12 +520,7 @@ func scanStream(
 			// two different problems are not collapsed into one entry.
 			key = string(language) + "|" + code + "|" + message
 		}
-		if seen[key] {
-			continue
-		}
-		seen[key] = true
-
-		diagnostics = append(diagnostics, model.Diagnostic{
+		retained.add(key, model.Diagnostic{
 			Source:   model.SourceLog,
 			Severity: severity,
 			Code:     code,
@@ -514,7 +532,7 @@ func scanStream(
 	}
 	closeGroup()
 
-	return diagnostics, scanner.Err()
+	return scanner.Err()
 }
 
 // classifyGroup assigns a code and severity to a CodeQL diagnostic title.

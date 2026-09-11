@@ -280,10 +280,11 @@ func (c *Collector) resolveOrganizations(ctx context.Context) ([]string, error) 
 	var ordered []string
 	add := func(name string) {
 		name = strings.TrimSpace(name)
-		if name == "" || unique[name] {
+		key := strings.ToLower(name)
+		if name == "" || unique[key] {
 			return
 		}
-		unique[name] = true
+		unique[key] = true
 		ordered = append(ordered, name)
 	}
 
@@ -318,6 +319,7 @@ func (c *Collector) resolveOrganizations(ctx context.Context) ([]string, error) 
 // collectOrganization scans a single organization.
 func (c *Collector) collectOrganization(ctx context.Context, org string) ([]model.Repo, error) {
 	configurations, err := c.loadConfigurations(ctx, org, c.options.SecurityConfiguration)
+	var configurationEvidenceError string
 	switch {
 	case errors.Is(err, errConfigurationsUnavailable):
 		// A filter that cannot be evaluated must fail loudly. Continuing would
@@ -333,6 +335,7 @@ func (c *Collector) collectOrganization(ctx context.Context, org string) ([]mode
 			c.warn("code security configuration data is unavailable for %s; "+
 				"attachment status will be omitted and failed rollouts cannot be detected", org)
 		}
+		configurationEvidenceError = "security configuration attachment status could not be read"
 	case err != nil:
 		return nil, err
 	}
@@ -373,7 +376,7 @@ func (c *Collector) collectOrganization(ctx context.Context, org string) ([]mode
 
 	c.progress("Scanning %s: %d of %d repositories in scope", org, len(eligible), len(sources))
 
-	return c.scanRepositories(ctx, org, eligible, properties, configurations)
+	return c.scanRepositories(ctx, org, eligible, properties, configurations, configurationEvidenceError)
 }
 
 // needsProperties reports whether custom property values have to be fetched.
@@ -407,6 +410,7 @@ func (c *Collector) scanRepositories(
 	sources []apiRepository,
 	properties map[string]map[string]string,
 	configurations *configurationIndex,
+	configurationEvidenceError string,
 ) ([]model.Repo, error) {
 	results := make([]model.Repo, len(sources))
 	included := make([]bool, len(sources))
@@ -435,6 +439,9 @@ func (c *Collector) scanRepositories(
 				source := sources[index]
 
 				extra := repoContext{Properties: c.filterProperties(properties[source.Name])}
+				if configurationEvidenceError != "" {
+					extra.Errors = []string{configurationEvidenceError}
+				}
 				if configurations != nil {
 					if configuration, ok := configurations.byRepo[source.Name]; ok {
 						extra.ConfigurationName = configuration.ConfigurationName
@@ -511,6 +518,7 @@ func (c *Collector) applyDeepDiagnostics(ctx context.Context, repo *model.Repo) 
 		// The inspection did not happen, so the repository must be
 		// reclassified as incomplete rather than left with its earlier
 		// verdict.
+		repo.Diagnostics = append(repo.Diagnostics, diagnostics...)
 		repo.Errors = append(repo.Errors, fmt.Sprintf("deep diagnostics: %v", err))
 		finalizeStatus(repo, hasWarningDiagnostic(repo.Diagnostics))
 		return

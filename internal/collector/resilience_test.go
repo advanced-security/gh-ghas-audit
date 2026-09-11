@@ -237,6 +237,30 @@ func TestSecurityConfigurationFilterFailsLoudlyWhenUnavailable(t *testing.T) {
 	}
 }
 
+func TestUnreadableAttachmentEvidenceMarksEveryRepositoryIncomplete(t *testing.T) {
+	client := buildClient(t, scenario{
+		name:         "otherwise-healthy",
+		languages:    []string{"Go"},
+		defaultSetup: defaultSetup{State: "configured", Languages: []string{"go"}},
+		workflows:    codeqlWorkflows(),
+		runs:         map[string]any{"": runList("success", time.Hour)},
+		jobs:         jobsFor(map[string]string{"go": "success"}),
+		databases:    databasesFor([]string{"go"}, time.Hour),
+	})
+	client.set("orgs/"+testOrg+"/code-security/configurations?",
+		&ghapi.StatusError{StatusCode: http.StatusForbidden, Message: "denied"})
+
+	report := collect(t, client, defaultActivityOptions())
+	repo := findRepo(t, report, "otherwise-healthy")
+
+	if !repo.Status.Incomplete || !report.Stats.Incomplete || repo.Status.Overall == model.SeverityHealthy {
+		t.Fatalf("missing attachment evidence looked complete: repo=%+v report=%+v", repo.Status, report.Stats)
+	}
+	if !strings.Contains(strings.Join(repo.Errors, " "), "attachment status") {
+		t.Fatalf("repository error does not identify missing attachment evidence: %v", repo.Errors)
+	}
+}
+
 func TestPropertyFilterFailsLoudlyWhenUnavailable(t *testing.T) {
 	client := buildClient(t, scenario{name: "any", languages: []string{"Go"}})
 	client.set("orgs/"+testOrg+"/properties/values?", &ghapi.StatusError{

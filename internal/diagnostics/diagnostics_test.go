@@ -3,6 +3,7 @@ package diagnostics
 import (
 	"archive/zip"
 	"bytes"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -452,13 +453,37 @@ func TestFindingsAreCappedPerRun(t *testing.T) {
 		builder.WriteString(fmt.Sprintf("2026-09-05T14:34:17Z ##[warning]Unfamiliar problem number %d\n", index))
 	}
 
-	found := scanArchive(t, map[string]string{"0_Analyze (go).txt": builder.String()})
+	found, err := Scan(buildArchive(t, map[string]string{"0_Analyze (go).txt": builder.String()}),
+		"https://github.com/acme/app/actions/runs/1", 300)
+	if !errors.Is(err, ErrDiagnosticsTruncated) {
+		t.Fatalf("cap must make the inspection explicitly incomplete: %v", err)
+	}
 	if len(found) > maxDiagnosticsPerRun {
 		t.Fatalf("got %d diagnostics, want at most %d", len(found), maxDiagnosticsPerRun)
 	}
 	if len(found) == 0 {
 		t.Fatal("expected some diagnostics before the cap was reached")
 	}
+}
+
+func TestWarningAfterInformationalCapIsRetained(t *testing.T) {
+	var builder strings.Builder
+	for index := 0; index < maxDiagnosticsPerRun; index++ {
+		builder.WriteString(fmt.Sprintf("##[group]Used build tool %d (1 result)\n* informational\n##[endgroup]\n", index))
+	}
+	builder.WriteString("##[group]Low Go analysis quality (1 result)\n* warning after suggestions\n##[endgroup]\n")
+
+	found, err := Scan(buildArchive(t, map[string]string{"0_Analyze (go).txt": builder.String()}),
+		"https://github.com/acme/app/actions/runs/1", 300)
+	if !errors.Is(err, ErrDiagnosticsTruncated) {
+		t.Fatalf("cap must make the inspection explicitly incomplete: %v", err)
+	}
+	for _, diagnostic := range found {
+		if diagnostic.Code == "low-quality-scan" && diagnostic.Severity == severityWarning {
+			return
+		}
+	}
+	t.Fatalf("later warning was hidden by informational findings: %+v", found)
 }
 
 func TestScanHandlesEmptyAndInvalidArchives(t *testing.T) {

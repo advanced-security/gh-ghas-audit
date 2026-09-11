@@ -668,7 +668,14 @@ func parsePropertyFilters(values []string) (map[string][]string, error) {
 		if err := validateGlobs(patterns, "--property-filter"); err != nil {
 			return nil, err
 		}
-		filters[name] = append(filters[name], patterns...)
+		key := name
+		for existing := range filters {
+			if strings.EqualFold(existing, name) {
+				key = existing
+				break
+			}
+		}
+		filters[key] = append(filters[key], patterns...)
 	}
 	return filters, nil
 }

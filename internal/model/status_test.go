@@ -30,6 +30,16 @@ func TestClassifyPrecedence(t *testing.T) {
 			want: SeverityFailing,
 		},
 		{
+			name: "failure outranks failed security configuration attachment",
+			status: Status{
+				Configuration: ConfigAttachFailed,
+				Execution:     ExecFailure,
+				Freshness:     FreshStale,
+				Coverage:      CoveragePartial,
+			},
+			want: SeverityFailing,
+		},
+		{
 			name: "timed out counts as failing",
 			status: Status{
 				Configuration: ConfigConfigured,

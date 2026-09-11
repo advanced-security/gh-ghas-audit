@@ -75,6 +75,11 @@ func TestParsePropertyFiltersValidatesEveryValue(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(filters, want) {
 		t.Fatalf("valid multi-select filters = %v, %v; want %v", filters, err, want)
 	}
+
+	filters, err = parsePropertyFilters([]string{"Project=A", "project=B", "PROJECT=C"})
+	if err != nil || len(filters) != 1 || !reflect.DeepEqual(filters["Project"], []string{"A", "B", "C"}) {
+		t.Fatalf("case-insensitive property filters were not merged as alternatives: %v, %v", filters, err)
+	}
 }
 
 func TestRepositoryScopeConflictsFailBeforeCacheAndCollection(t *testing.T) {

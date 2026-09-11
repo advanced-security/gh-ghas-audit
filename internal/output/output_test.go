@@ -241,8 +241,13 @@ func TestWriteCSVIncludesEvidenceColumns(t *testing.T) {
 	if row[index["Overall status"]] != string(model.SeverityDegraded) {
 		t.Errorf("overall status = %q", row[index["Overall status"]])
 	}
-	if row[index["Languages not analyzed"]] != "python" {
-		t.Errorf("languages not analyzed = %q, want python", row[index["Languages not analyzed"]])
+	if row[index["Languages analyzed successfully"]] != "java-kotlin" {
+		t.Errorf("languages analyzed successfully = %q, want java-kotlin",
+			row[index["Languages analyzed successfully"]])
+	}
+	if row[index["Languages without successful analysis"]] != "python" {
+		t.Errorf("languages without successful analysis = %q, want python",
+			row[index["Languages without successful analysis"]])
 	}
 	if row[index["Last successful scan"]] != "2026-09-01T12:00:00Z" {
 		t.Errorf("last successful scan = %q", row[index["Last successful scan"]])

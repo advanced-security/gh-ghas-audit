@@ -312,6 +312,10 @@ func setupNoun(status *Status) string {
 func classify(status *Status, hasWarning bool) (Severity, []string) {
 	var reasons []string
 
+	if ExecutionFailed(status.Execution) {
+		return SeverityFailing, []string{"latest analysis run reported " + string(status.Execution)}
+	}
+
 	switch status.Configuration {
 	case ConfigUnavailable:
 		return SeverityUnavailable, []string{"code scanning configuration could not be read for this repository"}
@@ -336,10 +340,6 @@ func classify(status *Status, hasWarning bool) (Severity, []string) {
 		return SeverityInProgress, []string{"security configuration is still being applied"}
 	case ConfigUnknown:
 		return SeverityUnknown, []string{"configuration state could not be determined"}
-	}
-
-	if ExecutionFailed(status.Execution) {
-		return SeverityFailing, []string{"latest analysis run reported " + string(status.Execution)}
 	}
 
 	if ExecutionStalled(status.Execution) {

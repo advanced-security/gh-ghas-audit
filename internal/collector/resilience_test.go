@@ -114,6 +114,31 @@ func TestActiveRepositoryWithCodeScanningDisabledResponseIsIncomplete(t *testing
 	}
 }
 
+func TestUnreadAdvancedSetupEvidenceIsUnknownRatherThanNotConfigured(t *testing.T) {
+	for _, status := range []int{http.StatusForbidden, http.StatusTooManyRequests, http.StatusInternalServerError} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			client := buildClient(t, scenario{
+				name:         "advanced-unreadable",
+				languages:    []string{"Go"},
+				defaultSetup: defaultSetup{State: "not-configured"},
+			})
+			client.set("repos/"+testOrg+"/advanced-unreadable/code-scanning/analyses",
+				&ghapi.StatusError{StatusCode: status, Message: "analysis evidence unavailable"})
+
+			report := collect(t, client, defaultActivityOptions())
+			repo := findRepo(t, report, "advanced-unreadable")
+
+			if repo.Status.Configuration != model.ConfigUnknown || repo.Status.Overall != model.SeverityUnknown {
+				t.Fatalf("HTTP %d became a definitive setup verdict: %+v", status, repo.Status)
+			}
+			if !repo.Status.Incomplete || !report.Stats.Incomplete || len(repo.Errors) == 0 {
+				t.Fatalf("HTTP %d did not propagate incomplete evidence: repo=%+v report=%+v",
+					status, repo, report.Stats)
+			}
+		})
+	}
+}
+
 // A repository must never be asserted healthy on the strength of a check that
 // did not actually run.
 func TestIncompleteEvidenceIsNeverReportedHealthy(t *testing.T) {

@@ -135,6 +135,7 @@ func (c *Collector) collectRepository(ctx context.Context, org string, source ap
 			report, err := c.collectAnalyses(ctx, org, source.Name, repo.DefaultBranch)
 			if err != nil {
 				repo.Errors = append(repo.Errors, fmt.Sprintf("analyses: %v", err))
+				repo.Status.Configuration = model.ConfigUnknown
 			}
 			// Analyses left behind by default setup after it was switched off
 			// are not evidence of an advanced setup workflow. Treating them as

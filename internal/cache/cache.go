@@ -199,7 +199,9 @@ func (s *Store) Prune() error {
 			continue
 		}
 		if info.ModTime().Before(cutoff) {
-			_ = os.Remove(filepath.Join(s.dir, item.Name()))
+			if err := os.Remove(filepath.Join(s.dir, item.Name())); err != nil {
+				return fmt.Errorf("removing expired cache entry %s: %w", item.Name(), err)
+			}
 		}
 	}
 	return nil

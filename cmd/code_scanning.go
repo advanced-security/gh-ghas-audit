@@ -174,13 +174,22 @@ func (opts *codeScanningOptions) run(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return fmt.Errorf("invalid --stale-after: %w", err)
 	}
+	if staleAfter == 0 {
+		return errors.New("invalid --stale-after: duration must be greater than zero")
+	}
 	staleAfterInactive, err := parseDuration(opts.staleAfterInactive)
 	if err != nil {
 		return fmt.Errorf("invalid --stale-after-inactive: %w", err)
 	}
+	if staleAfterInactive == 0 {
+		return errors.New("invalid --stale-after-inactive: duration must be greater than zero")
+	}
 	inactiveAfter, err := parseDuration(opts.inactiveAfter)
 	if err != nil {
 		return fmt.Errorf("invalid --inactive-after: %w", err)
+	}
+	if inactiveAfter == 0 {
+		return errors.New("invalid --inactive-after: duration must be greater than zero")
 	}
 	activityFilter, err := parseActivities(opts.activityFilter)
 	if err != nil {
@@ -592,6 +601,9 @@ func parseDuration(value string) (time.Duration, error) {
 	parsed, err := time.ParseDuration(value)
 	if err != nil {
 		return 0, fmt.Errorf("expected a duration such as 8d, 24h or 90m, got %q", value)
+	}
+	if parsed < 0 {
+		return 0, fmt.Errorf("duration must not be negative, got %q", value)
 	}
 	return parsed, nil
 }

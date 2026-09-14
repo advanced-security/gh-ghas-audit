@@ -25,6 +25,7 @@ jobs:
 
       - name: gofmt check
         if: runner.os == 'Linux'
+        shell: bash
         run: |
           fmt_out=$(gofmt -l .)
           if [ -n "$fmt_out" ]; then
@@ -35,6 +36,7 @@ jobs:
 
       - name: Verify go.mod and go.sum are tidy
         if: runner.os == 'Linux'
+        shell: bash
         run: |
           go mod tidy
           git diff --exit-code -- go.mod go.sum

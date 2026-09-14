@@ -74,4 +74,3 @@ func TestPaginationSurvivesA304WithoutALinkHeader(t *testing.T) {
 		t.Fatal("the warm run made no conditional requests, so the cache was not exercised")
 	}
 }
-

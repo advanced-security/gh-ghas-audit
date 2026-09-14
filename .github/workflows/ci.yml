@@ -24,6 +24,7 @@ jobs:
           go-version-file: go.mod
 
       - name: Verify go.mod and go.sum are tidy
+        if: runner.os == 'Linux'
         run: |
           go mod tidy
           git diff --exit-code -- go.mod go.sum

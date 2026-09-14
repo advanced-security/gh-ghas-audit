@@ -1,12 +1,15 @@
 name: release
 
-# Maintainers: use "Run workflow" and do not create the GitHub Release first.
-# Immutable releases cannot accept assets uploaded after publication.
+# Maintainers should use "Run workflow"; tag pushes remain supported for automation.
+# Do not create the GitHub Release first because immutable releases cannot accept later assets.
 on:
+  push:
+    tags:
+      - "v*"
   workflow_dispatch:
     inputs:
       version:
-        description: Version tag (for example, v2.0.1 or v2.1.0-rc.1)
+        description: Version tag without build metadata (for example, v2.0.1 or v2.1.0-rc.1)
         required: true
         type: string
       prerelease:
@@ -15,10 +18,10 @@ on:
         default: false
         type: boolean
 
-run-name: Release ${{ inputs.version }}
+run-name: Release ${{ inputs.version || github.ref_name }}
 
 concurrency:
-  group: release-${{ inputs.version }}
+  group: release-${{ inputs.version || github.ref_name }}
   cancel-in-progress: false
 
 permissions:
@@ -37,14 +40,14 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ inputs.version || github.ref_name }}
           PRERELEASE: ${{ inputs.prerelease }}
         run: |
           set -euo pipefail
 
           semver_regex='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*)|([0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))(\.((0|[1-9][0-9]*)|([0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)))*)?$'
           if [[ ! "$VERSION" =~ $semver_regex ]]; then
-            echo "::error title=Invalid release version::Version must be semantic versioning with a leading v, for example v2.0.1 or v2.1.0-rc.1."
+            echo "::error title=Invalid release version::Version must be semantic versioning with a leading v and no build metadata, for example v2.0.1 or v2.1.0-rc.1."
             exit 1
           fi
 
@@ -52,7 +55,7 @@ jobs:
           if [[ "$VERSION" == *-* ]]; then
             has_prerelease=true
           fi
-          if [[ "$PRERELEASE" != "$has_prerelease" ]]; then
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" && "$PRERELEASE" != "$has_prerelease" ]]; then
             echo "::error title=Prerelease mismatch::The prerelease checkbox must be selected exactly when the version contains a prerelease suffix."
             exit 1
           fi
@@ -81,29 +84,34 @@ jobs:
               ;;
           esac
 
+          target_commit="$(git rev-parse HEAD)"
           tag_refs="$RUNNER_TEMP/tag-refs.txt"
           if git ls-remote --exit-code --tags origin \
             "refs/tags/${VERSION}" "refs/tags/${VERSION}^{}" > "$tag_refs"; then
             git fetch --no-tags origin "refs/tags/${VERSION}:refs/tags/${VERSION}"
             tag_commit="$(git rev-list -n 1 "$VERSION")"
-            if [[ "$tag_commit" != "$GITHUB_SHA" ]]; then
-              echo "::error title=Tag points elsewhere::${VERSION} resolves to ${tag_commit}, not the selected workflow commit ${GITHUB_SHA}."
+            if [[ "$tag_commit" != "$target_commit" ]]; then
+              echo "::error title=Tag points elsewhere::${VERSION} resolves to ${tag_commit}, not the checked-out commit ${target_commit}."
               exit 1
             fi
-            echo "Tag ${VERSION} already resolves to ${GITHUB_SHA}; continuing this retry."
+            echo "Tag ${VERSION} already resolves to ${target_commit}; continuing."
           else
             ls_remote_status=$?
             if [[ "$ls_remote_status" -ne 2 ]]; then
               echo "::error title=Tag lookup failed::Unable to determine whether ${VERSION} already exists."
               exit "$ls_remote_status"
             fi
+            if [[ "$GITHUB_EVENT_NAME" != "workflow_dispatch" ]]; then
+              echo "::error title=Tag no longer exists::${VERSION} was not found on the remote."
+              exit 1
+            fi
 
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git tag --annotate "$VERSION" "$GITHUB_SHA" --message "Release ${VERSION}"
+            git tag --annotate "$VERSION" "$target_commit" --message "Release ${VERSION}"
             git push origin "refs/tags/${VERSION}"
           fi
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
       - uses: cli/gh-extension-precompile@v2

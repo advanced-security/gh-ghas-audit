@@ -1,0 +1,120 @@
+# Copy into .github/workflows/ after the v2 release.
+# App read permissions: Metadata, Pull requests, Actions, Code scanning alerts,
+# organization Administration and Custom properties.
+name: Code scanning status
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+    inputs:
+      scan_depth:
+        description: Evidence depth
+        type: choice
+        default: health
+        options: [config, health, diagnostics]
+      deep_scope:
+        description: Log selection at diagnostics depth
+        type: choice
+        default: all
+        options: [all, problematic]
+
+permissions:
+  contents: read
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    # App installation tokens last one hour. This example is for shorter runs.
+    # Split larger scopes or run the CLI with suitable longer-lived credentials.
+    timeout-minutes: 60
+    steps:
+      - name: Generate an organization-scoped token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.STATUS_APP_ID }}
+          private-key: ${{ secrets.STATUS_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - name: Restore the conditional request cache
+        uses: actions/cache@v4
+        with:
+          path: .ghas-audit-cache
+          key: ghas-audit-v2-${{ github.run_id }}
+          restore-keys: |
+            ghas-audit-v2-
+
+      - name: Install v2
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: gh extension install advanced-security/gh-ghas-audit --pin v2.0.0
+
+      - name: Collect once
+        id: audit
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          ORG: ${{ github.repository_owner }}
+          DEPTH: ${{ inputs.scan_depth || 'health' }}
+          DEEP_SCOPE: ${{ inputs.deep_scope || 'all' }}
+        shell: bash
+        run: |
+          mkdir -p reports
+          args=(
+            code-scanning --organization "$ORG"
+            --scan-depth "$DEPTH" --deep-scope "$DEEP_SCOPE"
+            --skip-archived --skip-forks --concurrency 8
+            --cache-dir .ghas-audit-cache --quiet
+            --format json --output reports/status.json
+            --fail-on failing,stalled
+          )
+          # Preserve policy exit 2 so the report is published before failing.
+          set +e
+          gh ghas-audit "${args[@]}"
+          result=$?
+          set -e
+          if [ "$result" -ne 0 ] && [ "$result" -ne 2 ]; then
+            exit "$result"
+          fi
+          echo "exit-code=$result" >> "$GITHUB_OUTPUT"
+
+      - name: Summarize
+        run: |
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+
+          with open("reports/status.json", encoding="utf-8") as handle:
+              report = json.load(handle)
+          summary = report["summary"]
+          print("## Code scanning status\n")
+          print(f"Depth: {report['settings']['scan_depth']}")
+          print(f"Repositories: {summary['total_repositories']}")
+          print(f"Needing attention: {summary['needs_attention']}\n")
+          print("| Status | Repositories |\n| --- | --- |")
+          for name, count in sorted(summary["by_severity"].items()):
+              print(f"| {name} | {count} |")
+          if report["stats"]["incomplete"]:
+              print("\n> Incomplete report. Inspect warnings and repository errors.")
+          PY
+
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: code-scanning-status-${{ github.run_id }}
+          path: reports/
+          retention-days: 90
+
+      - name: Enforce the collected result
+        env:
+          COLLECTION_EXIT: ${{ steps.audit.outputs.exit-code }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+
+          with open("reports/status.json", encoding="utf-8") as handle:
+              report = json.load(handle)
+          sys.exit(1 if report["stats"]["incomplete"] else int(os.environ["COLLECTION_EXIT"]))
+          PY

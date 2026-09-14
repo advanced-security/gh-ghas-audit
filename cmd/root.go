@@ -1,80 +1,115 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	"runtime/debug"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
-// Holds flags for organizations and repository.
-var (
-	Organizations         string
-	Repository            string
-	SecurityConfiguration string // Security configuration name to filter repos
-	CSVOutput     string // File path for CSV output
-	SkipArchived  bool   // Skip archived repositories
-	SkipForks     bool   // Skip forked repositories
-)
-
-// rootCmd is the base command called without any subcommands.
-var rootCmd = &cobra.Command{
-	Use:   "gh-ghas-audit",
-	Short: "Audit your GHAS deployment",
-	Long:  `Audit your GHAS deployment`,
-	Run: func(cmd *cobra.Command, args []string) {
-		_ = cmd.Help()
-	},
+type scopeOptions struct {
+	organizations         string
+	repository            string
+	securityConfiguration string
+	skipArchived          bool
+	skipForks             bool
 }
 
-func init() {
+// buildVersion is overridden at release time via -ldflags.
+var buildVersion = ""
+
+// version reports the extension version, preferring a linker-provided value
+// and falling back to module build information.
+func version() string {
+	if buildVersion != "" {
+		return buildVersion
+	}
+	if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" && info.Main.Version != "(devel)" {
+		return info.Main.Version
+	}
+	return "2.0.0-dev"
+}
+
+// normalizeFlagNames accepts --organization as an alias for --organizations,
+// which is the singular form most users type first.
+func normalizeFlagNames(_ *pflag.FlagSet, name string) pflag.NormalizedName {
+	if name == "organization" {
+		name = "organizations"
+	}
+	return pflag.NormalizedName(name)
+}
+
+func newRootCommand() *cobra.Command {
+	scope := &scopeOptions{}
+	rootCmd := &cobra.Command{
+		Use:           "gh-ghas-audit",
+		Short:         "Audit your GHAS deployment",
+		Version:       version(),
+		SilenceErrors: true,
+		Args:          cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return cmd.Help()
+		},
+	}
+	rootCmd.SetGlobalNormalizationFunc(normalizeFlagNames)
+
 	rootCmd.PersistentFlags().StringVarP(
-		&Organizations,
+		&scope.organizations,
 		"organizations",
 		"o",
 		"",
 		"Comma separated list of organizations to audit",
 	)
 	rootCmd.PersistentFlags().StringVarP(
-		&Repository,
+		&scope.repository,
 		"repository",
 		"r",
 		"",
 		"Single repository to audit",
 	)
 	rootCmd.PersistentFlags().StringVar(
-		&CSVOutput,
-		"csv-output",
+		&scope.securityConfiguration,
+		"security-configuration",
 		"",
-		"File path to output CSV report",
+		"Filter repositories by security configuration name",
 	)
-	rootCmd.PersistentFlags().StringVar(
-    &SecurityConfiguration, 
-    "security-configuration",
-    "",
-    "Filter repositories by security configuration name",
-  )
 	rootCmd.PersistentFlags().BoolVar(
-		&SkipArchived,
+		&scope.skipArchived,
 		"skip-archived",
 		false,
 		"Skip archived repositories",
 	)
 	rootCmd.PersistentFlags().BoolVar(
-		&SkipForks,
+		&scope.skipForks,
 		"skip-forks",
 		false,
 		"Skip forked repositories",
 	)
 
-	// Attach code-scanning subcommand.
-	rootCmd.AddCommand(codeScanningAuditCmd)
+	rootCmd.AddCommand(newCodeScanningCommand(scope))
+	rootCmd.AddCommand(&cobra.Command{
+		Use:   "version",
+		Short: "Print the extension version",
+		Args:  cobra.NoArgs,
+		Run: func(cmd *cobra.Command, _ []string) {
+			fmt.Fprintln(cmd.OutOrStdout(), version())
+		},
+	})
+	return rootCmd
 }
 
 // Execute runs the main CLI command.
 func Execute() {
-	if err := rootCmd.Execute(); err != nil {
-		fmt.Println(err)
+	if err := newRootCommand().Execute(); err != nil {
+		// A requested exit code carries no message of its own.
+		var coded *exitCodeError
+		if errors.As(err, &coded) {
+			os.Exit(coded.ExitCode())
+		}
+		fmt.Fprintln(os.Stderr, "Error:", err)
 		os.Exit(1)
 	}
 }

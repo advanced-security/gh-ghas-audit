@@ -26,3 +26,7 @@ go.work.sum
 
 gh-ghas-audit
 *.csv
+# Local conditional-request cache directories used by code-scanning status
+.ghas-audit-cache/
+.huntcache/
+.cache/

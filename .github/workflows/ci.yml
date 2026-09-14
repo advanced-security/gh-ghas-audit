@@ -39,7 +39,10 @@ jobs:
         shell: bash
         run: |
           go mod tidy
-          git diff --exit-code -- go.mod go.sum
+          if ! git diff --exit-code -- go.mod go.sum; then
+            echo "::error::go.mod or go.sum changed after go mod tidy. Run go mod tidy and commit the result."
+            exit 1
+          fi
 
       - name: Build
         run: go build -v ./...

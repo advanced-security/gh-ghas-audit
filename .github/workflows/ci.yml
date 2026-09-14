@@ -23,6 +23,16 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: gofmt check
+        if: runner.os == 'Linux'
+        run: |
+          fmt_out=$(gofmt -l .)
+          if [ -n "$fmt_out" ]; then
+            echo "The following files are not gofmt'd:"
+            echo "$fmt_out"
+            exit 1
+          fi
+
       - name: Verify go.mod and go.sum are tidy
         if: runner.os == 'Linux'
         run: |
@@ -37,13 +47,3 @@ jobs:
 
       - name: Test
         run: go test -v ./...
-
-      - name: gofmt check
-        if: runner.os == 'Linux'
-        run: |
-          fmt_out=$(gofmt -l $(git ls-files '*.go'))
-          if [ -n "$fmt_out" ]; then
-            echo "The following files are not gofmt'd:"
-            echo "$fmt_out"
-            exit 1
-          fi

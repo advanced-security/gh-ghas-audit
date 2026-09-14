@@ -235,14 +235,17 @@ func featureUnavailable(err error, archived bool) bool {
 		return false
 	}
 	message := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(status.Message)), ".")
+	const codeScanningDisabled = "code scanning is not enabled for this repository"
+	if archived && (message == codeScanningDisabled ||
+		strings.HasPrefix(message, codeScanningDisabled+". ")) {
+		return true
+	}
 	switch message {
 	case "advanced security must be enabled for this repository",
 		"advanced security must be enabled for this repository to use code scanning",
 		"code security must be enabled for this repository",
 		"code security must be enabled for this repository to use code scanning":
 		return true
-	case "code scanning is not enabled for this repository":
-		return archived
 	default:
 		return false
 	}

@@ -68,7 +68,8 @@ func TestArchivedRepositoryWithCodeScanningDisabledIsExpectedUnavailable(t *test
 	client := buildClient(t, scenario{name: "archived", languages: []string{"Go"}})
 	client.set("repos/"+testOrg+"/archived/code-scanning/default-setup", &ghapi.StatusError{
 		StatusCode: http.StatusForbidden,
-		Message:    "Code scanning is not enabled for this repository",
+		Message: "Code scanning is not enabled for this repository. " +
+			"Please enable code scanning in the repository settings.",
 	})
 	client.graphql = func(_ string, _ map[string]any, out any) error {
 		payload := map[string]any{"organization": map[string]any{"repositories": map[string]any{
@@ -103,7 +104,8 @@ func TestActiveRepositoryWithCodeScanningDisabledResponseIsIncomplete(t *testing
 	client := buildClient(t, scenario{name: "active-disabled", languages: []string{"Go"}})
 	client.set("repos/"+testOrg+"/active-disabled/code-scanning/default-setup", &ghapi.StatusError{
 		StatusCode: http.StatusForbidden,
-		Message:    "Code scanning is not enabled for this repository",
+		Message: "Code scanning is not enabled for this repository. " +
+			"Please enable code scanning in the repository settings.",
 	})
 
 	report := collect(t, client, Options{})
@@ -111,6 +113,16 @@ func TestActiveRepositoryWithCodeScanningDisabledResponseIsIncomplete(t *testing
 
 	if !repo.Status.Incomplete || !report.Stats.Incomplete || len(repo.Errors) == 0 {
 		t.Fatalf("unexpected active 403 was treated as expected: repo=%+v report=%+v", repo, report.Stats)
+	}
+}
+
+func TestUnrecognizedArchivedForbiddenResponseRemainsIncomplete(t *testing.T) {
+	err := &ghapi.StatusError{
+		StatusCode: http.StatusForbidden,
+		Message:    "Resource not accessible by integration",
+	}
+	if featureUnavailable(err, true) {
+		t.Fatal("an unknown archived 403 must remain a collection failure")
 	}
 }
 

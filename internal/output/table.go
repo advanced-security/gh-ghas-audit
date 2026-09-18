@@ -353,24 +353,33 @@ func containsLanguage(languages []model.Language, wanted model.Language) bool {
 	return false
 }
 
-// codeqlVersionSummary aggregates the CodeQL CLI versions SARIF reported
-// across a repository's languages. Languages that share the same version are
-// grouped together and every group is tagged "version[language, ...]", the
-// same "value[language]" convention joinDiagnostics uses, so a reader never
-// has to guess whether a single version shown applies to every language or
-// just one - which matters because a repository mixing CodeQL versions across
-// languages (for example after a partial CLI upgrade) is worth noticing.
+// codeqlVersionSummary aggregates the CodeQL CLI version known for each of a
+// repository's languages. SARIF is preferred when it was collected; a
+// language whose SARIF fetch was skipped or failed (for example because a
+// known AnalysisError already explains its failure) falls back to the
+// version recovered from Actions logs, so a version is still shown wherever
+// evidence of any kind is available. Languages that share the same version
+// are grouped together and every group is tagged "version[language, ...]",
+// the same "value[language]" convention joinDiagnostics uses, so a reader
+// never has to guess whether a single version shown applies to every
+// language or just one - which matters because a repository mixing CodeQL
+// versions across languages (for example after a partial CLI upgrade) is
+// worth noticing.
 func codeqlVersionSummary(states []model.LanguageState) string {
 	var order []string
 	groups := map[string][]model.Language{}
 	for _, state := range states {
-		if !state.SARIFCollected || state.CodeQLVersion == "" {
+		version := state.LogCodeQLVersion
+		if state.SARIFCollected && state.CodeQLVersion != "" {
+			version = state.CodeQLVersion
+		}
+		if version == "" {
 			continue
 		}
-		if _, ok := groups[state.CodeQLVersion]; !ok {
-			order = append(order, state.CodeQLVersion)
+		if _, ok := groups[version]; !ok {
+			order = append(order, version)
 		}
-		groups[state.CodeQLVersion] = append(groups[state.CodeQLVersion], state.Language)
+		groups[version] = append(groups[version], state.Language)
 	}
 	if len(order) == 0 {
 		return ""

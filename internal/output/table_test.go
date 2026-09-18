@@ -156,6 +156,22 @@ func TestCodeqlVersionSummaryIsEmptyWithoutAnyCollectedVersion(t *testing.T) {
 	}
 }
 
+// A language whose SARIF was never collected (for example because a known
+// AnalysisError already explains its failure, so SARIF fetch is skipped)
+// still surfaces a version if one was recovered from Actions logs; SARIF's
+// version wins when both are available.
+func TestCodeqlVersionSummaryFallsBackToLogVersion(t *testing.T) {
+	states := []model.LanguageState{
+		{Language: model.LangJavaKotlin, AnalysisError: "analysis failed", LogCodeQLVersion: "2.27.0"},
+		{Language: model.LangCSharp, SARIFCollected: true, CodeQLVersion: "2.20.3", LogCodeQLVersion: "2.20.3"},
+		{Language: model.LangGo},
+	}
+	want := "2.27.0[java-kotlin]; 2.20.3[csharp]"
+	if got := codeqlVersionSummary(states); got != want {
+		t.Fatalf("codeqlVersionSummary = %q, want %q", got, want)
+	}
+}
+
 // Query packs are tagged per language because, unlike a CodeQL version,
 // packs are never expected to be shared across languages, and a mismatched
 // SARIFLanguage must not be silently merged into the wrong language's list.

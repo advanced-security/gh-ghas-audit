@@ -386,7 +386,7 @@ func TestWriteLanguageCSVIncludesSARIFColumns(t *testing.T) {
 			CodeQLVersion: "2.20.3", QueryPacks: []string{"codeql/java-queries@1.2.3"},
 			RuleCount: &rule, ResultsByLevel: map[string]int{"error": 1, "warning": 2}, ArtifactCount: &artifacts,
 		},
-		{Language: model.LangPython, Detected: true, Configured: true, JobConclusion: "failure"},
+		{Language: model.LangPython, Detected: true, Configured: true, JobConclusion: "failure", LogCodeQLVersion: "2.19.1"},
 	}
 
 	var buffer bytes.Buffer
@@ -403,7 +403,7 @@ func TestWriteLanguageCSVIncludesSARIFColumns(t *testing.T) {
 	}
 	for _, column := range []string{
 		"SARIF collected", "SARIF error", "SARIF language", "SARIF language mismatch",
-		"CodeQL version", "Query packs", "Rule count", "Results by level", "Artifact count",
+		"CodeQL version", "Log CodeQL version", "Query packs", "Rule count", "Results by level", "Artifact count",
 	} {
 		if _, ok := index[column]; !ok {
 			t.Fatalf("missing expected column %q, header %v", column, records[0])
@@ -432,6 +432,9 @@ func TestWriteLanguageCSVIncludesSARIFColumns(t *testing.T) {
 	if javaRow[index["CodeQL version"]] != "2.20.3" {
 		t.Errorf("java CodeQL version = %q, want 2.20.3", javaRow[index["CodeQL version"]])
 	}
+	if javaRow[index["Log CodeQL version"]] != "" {
+		t.Errorf("java Log CodeQL version = %q, want blank when only SARIF was collected", javaRow[index["Log CodeQL version"]])
+	}
 	if javaRow[index["Query packs"]] != "codeql/java-queries@1.2.3" {
 		t.Errorf("java query packs = %q", javaRow[index["Query packs"]])
 	}
@@ -447,7 +450,11 @@ func TestWriteLanguageCSVIncludesSARIFColumns(t *testing.T) {
 
 	// python never had SARIF attempted (no SarifFetcher, or a shallower
 	// depth): every SARIF column must be blank, not "false", so it cannot be
-	// misread as a definite failure.
+	// misread as a definite failure. Log CodeQL version is independent of
+	// SARIF, so it is populated even though nothing else here is.
+	if pythonRow[index["Log CodeQL version"]] != "2.19.1" {
+		t.Errorf("python Log CodeQL version = %q, want 2.19.1", pythonRow[index["Log CodeQL version"]])
+	}
 	for _, column := range []string{
 		"SARIF collected", "SARIF error", "SARIF language", "SARIF language mismatch",
 		"CodeQL version", "Query packs", "Rule count", "Results by level", "Artifact count",

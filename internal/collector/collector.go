@@ -67,7 +67,11 @@ const (
 // internal/diagnostics and injected so the collector has no hard dependency on
 // best-effort log parsing.
 type LogFetcher interface {
-	Inspect(ctx context.Context, org, repo string, runID int64) ([]model.Diagnostic, error)
+	// Inspect returns diagnostics found in the run's logs, plus any
+	// per-language CodeQL CLI version recovered from the log text (a plain
+	// map, not a diagnostics-specific type, so the collector stays decoupled
+	// from log parsing).
+	Inspect(ctx context.Context, org, repo string, runID int64) ([]model.Diagnostic, map[model.Language]string, error)
 }
 
 // SarifFetcher retrieves and interprets SARIF for a repository's per-language
@@ -537,7 +541,7 @@ func (c *Collector) applyDeepDiagnostics(ctx context.Context, repo *model.Repo) 
 		return
 	}
 
-	diagnostics, err := c.options.LogFetcher.Inspect(ctx, repo.Organization, repo.Name, run.ID)
+	diagnostics, versions, err := c.options.LogFetcher.Inspect(ctx, repo.Organization, repo.Name, run.ID)
 	if err != nil {
 		if ctx.Err() != nil {
 			return
@@ -546,10 +550,12 @@ func (c *Collector) applyDeepDiagnostics(ctx context.Context, repo *model.Repo) 
 		// reclassified as incomplete rather than left with its earlier
 		// verdict.
 		repo.Diagnostics = append(repo.Diagnostics, diagnostics...)
+		applyLogCodeQLVersions(repo, versions)
 		repo.Errors = append(repo.Errors, fmt.Sprintf("deep diagnostics: %v", err))
 		finalizeStatus(repo, hasWarningDiagnostic(repo.Diagnostics))
 		return
 	}
+	applyLogCodeQLVersions(repo, versions)
 	if len(diagnostics) == 0 {
 		return
 	}
@@ -558,6 +564,23 @@ func (c *Collector) applyDeepDiagnostics(ctx context.Context, repo *model.Repo) 
 	// A log-derived warning can promote an otherwise healthy repository to
 	// degraded, which is the "green run, low quality scan" case.
 	finalizeStatus(repo, hasWarningDiagnostic(repo.Diagnostics))
+}
+
+// applyLogCodeQLVersions copies a per-language CodeQL CLI version recovered
+// from Actions logs onto the matching LanguageState. It runs even when no
+// version was found and is separate from the SARIF-derived CodeQLVersion, so
+// a language whose SARIF fetch is skipped because of a known AnalysisError
+// can still surface a version.
+func applyLogCodeQLVersions(repo *model.Repo, versions map[model.Language]string) {
+	if len(versions) == 0 {
+		return
+	}
+	for index := range repo.Languages {
+		state := &repo.Languages[index]
+		if version, ok := versions[state.Language]; ok {
+			state.LogCodeQLVersion = version
+		}
+	}
 }
 
 // applySarifDiagnostics optionally augments a repository's per-language state

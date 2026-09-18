@@ -181,6 +181,13 @@ type LanguageState struct {
 	// CodeQLVersion is the CodeQL CLI version recorded in the SARIF tool
 	// driver.
 	CodeQLVersion string `json:"codeql_version,omitempty"`
+	// LogCodeQLVersion is the CodeQL CLI version recovered from the Actions
+	// log's toolcache path (for example ".../hostedtoolcache/CodeQL/2.27.0/
+	// x64/..."). Unlike CodeQLVersion, it does not require SARIF and remains
+	// available even for a language whose analysis failed and therefore has
+	// no SARIF representation to read a version from - which is exactly the
+	// case an already-known AnalysisError causes SARIF collection to skip.
+	LogCodeQLVersion string `json:"log_codeql_version,omitempty"`
 	// QueryPacks lists the query packs the analysis used, as "name@version".
 	QueryPacks []string `json:"query_packs,omitempty"`
 	// RuleCount is the number of distinct rules (queries) available to the

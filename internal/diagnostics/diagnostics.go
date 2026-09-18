@@ -65,6 +65,15 @@ const (
 // warnings and errors in the run summary.
 var annotationPattern = regexp.MustCompile(`##\[(warning|error)\](.*)$`)
 
+// codeqlVersionPattern matches the CodeQL CLI toolcache path Actions prints
+// while downloading, extracting or invoking the CLI, for example
+// "/opt/hostedtoolcache/CodeQL/2.27.0/x64/codeql/codeql". A job log mentions
+// this path repeatedly (bundle download, pack resolution, database finalize,
+// and so on); scanStream keeps the last match, which is whichever version was
+// actually installed and used to run the analysis, since an old cached
+// version being deleted is always logged before the version that replaces it.
+var codeqlVersionPattern = regexp.MustCompile(`/CodeQL/(\d+\.\d+\.\d+(?:\.\d+)?)/x64\b`)
+
 // diagnosticGroupPattern matches the log block CodeQL emits for each
 // diagnostic it reports, for example:
 //
@@ -328,25 +337,26 @@ func (f *Fetcher) remainingBytes() int64 {
 	return remaining
 }
 
-// Inspect downloads the log archive for a run and returns any findings.
-func (f *Fetcher) Inspect(ctx context.Context, org, repo string, runID int64) ([]model.Diagnostic, error) {
+// Inspect downloads the log archive for a run and returns any findings,
+// along with any per-language CodeQL CLI version recovered from the log text.
+func (f *Fetcher) Inspect(ctx context.Context, org, repo string, runID int64) ([]model.Diagnostic, map[model.Language]string, error) {
 	// Archive sizes are unknown until downloaded. Serialize downloads so
 	// concurrent workers cannot each spend the same remaining byte budget.
 	select {
 	case f.downloadSlot <- struct{}{}:
 		defer func() { <-f.downloadSlot }()
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return nil, nil, ctx.Err()
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if exhausted, message := f.Budget(); exhausted {
-		return nil, fmt.Errorf("%w: %s", ErrBudgetExhausted, message)
+		return nil, nil, fmt.Errorf("%w: %s", ErrBudgetExhausted, message)
 	}
 	remaining := f.remainingBytes()
 	if !f.reserve() {
-		return nil, fmt.Errorf("%w: maximum of %d repositories inspected",
+		return nil, nil, fmt.Errorf("%w: maximum of %d repositories inspected",
 			ErrBudgetExhausted, f.limits.MaxRepositories)
 	}
 
@@ -363,13 +373,13 @@ func (f *Fetcher) Inspect(ctx context.Context, org, repo string, runID int64) ([
 		// inspection stopped.
 		if errors.Is(err, ghapi.ErrResponseTooLarge) {
 			f.bytesRead.Store(f.limits.MaxBytes)
-			return nil, fmt.Errorf("%w: archive exceeds the remaining byte budget; raise --deep-diagnostics-max-mb",
+			return nil, nil, fmt.Errorf("%w: archive exceeds the remaining byte budget; raise --deep-diagnostics-max-mb",
 				ErrBudgetExhausted)
 		}
 		if ghapi.IsNotFound(err) || ghapi.IsForbidden(err) {
-			return nil, fmt.Errorf("logs are unavailable or access is denied: %w", err)
+			return nil, nil, fmt.Errorf("logs are unavailable or access is denied: %w", err)
 		}
-		return nil, err
+		return nil, nil, err
 	}
 	f.bytesRead.Add(int64(len(archive)))
 
@@ -378,11 +388,12 @@ func (f *Fetcher) Inspect(ctx context.Context, org, repo string, runID int64) ([
 }
 
 // Scan extracts Actions annotations from a zipped log archive and classifies
-// them. It is exported so the parsers can be tested against recorded log
+// them, along with any per-language CodeQL CLI version recovered from the log
+// text. It is exported so the parsers can be tested against recorded log
 // fixtures without any network access.
-func Scan(archive []byte, runURL string, maxExcerpt int) ([]model.Diagnostic, error) {
+func Scan(archive []byte, runURL string, maxExcerpt int) ([]model.Diagnostic, map[model.Language]string, error) {
 	if len(archive) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	if maxExcerpt <= 0 {
 		maxExcerpt = defaultMaxExcerpt
@@ -390,10 +401,11 @@ func Scan(archive []byte, runURL string, maxExcerpt int) ([]model.Diagnostic, er
 
 	reader, err := zip.NewReader(bytes.NewReader(archive), int64(len(archive)))
 	if err != nil {
-		return nil, fmt.Errorf("reading log archive: %w", err)
+		return nil, nil, fmt.Errorf("reading log archive: %w", err)
 	}
 
 	retained := &diagnosticRetention{seen: map[string]bool{}}
+	var versions map[model.Language]string
 
 	for _, file := range reader.File {
 		if file.FileInfo().IsDir() || !strings.HasSuffix(strings.ToLower(file.Name), ".txt") {
@@ -403,23 +415,29 @@ func Scan(archive []byte, runURL string, maxExcerpt int) ([]model.Diagnostic, er
 
 		opened, err := file.Open()
 		if err != nil {
-			return retained.diagnostics, fmt.Errorf("opening log %q: %w", file.Name, err)
+			return retained.diagnostics, versions, fmt.Errorf("opening log %q: %w", file.Name, err)
 		}
-		scanErr := scanStream(opened, language, runURL, maxExcerpt, retained)
+		version, scanErr := scanStream(opened, language, runURL, maxExcerpt, retained)
 		closeErr := opened.Close()
+		if version != "" && language != "" {
+			if versions == nil {
+				versions = map[model.Language]string{}
+			}
+			versions[language] = version
+		}
 		if scanErr != nil {
-			return retained.diagnostics, fmt.Errorf("reading log %q: %w", file.Name, scanErr)
+			return retained.diagnostics, versions, fmt.Errorf("reading log %q: %w", file.Name, scanErr)
 		}
 		if closeErr != nil {
-			return retained.diagnostics, fmt.Errorf("closing log %q: %w", file.Name, closeErr)
+			return retained.diagnostics, versions, fmt.Errorf("closing log %q: %w", file.Name, closeErr)
 		}
 	}
 
 	if retained.truncated {
-		return retained.diagnostics, fmt.Errorf("%w: retained %d findings",
+		return retained.diagnostics, versions, fmt.Errorf("%w: retained %d findings",
 			ErrDiagnosticsTruncated, maxDiagnosticsPerRun)
 	}
-	return retained.diagnostics, nil
+	return retained.diagnostics, versions, nil
 }
 
 type diagnosticRetention struct {
@@ -455,7 +473,7 @@ func scanStream(
 	runURL string,
 	maxExcerpt int,
 	retained *diagnosticRetention,
-) error {
+) (string, error) {
 
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 0, 64*1024), maxLineLength)
@@ -463,6 +481,7 @@ func scanStream(
 	// State for an open CodeQL diagnostic block.
 	var groupTitle string
 	var groupBody []string
+	var version string
 
 	closeGroup := func() {
 		if groupTitle == "" {
@@ -491,6 +510,14 @@ func scanStream(
 
 	for scanner.Scan() {
 		line := scanner.Text()
+
+		// The toolcache path is logged repeatedly throughout a job (bundle
+		// download, pack resolution, database finalize, and so on). Keeping
+		// the last match means an old cached version deleted mid-log never
+		// wins over the version actually installed and used afterwards.
+		if match := codeqlVersionPattern.FindStringSubmatch(line); match != nil {
+			version = match[1]
+		}
 
 		// CodeQL diagnostic blocks carry the tool status page content, so they
 		// are preferred over free-form annotation text.
@@ -536,7 +563,7 @@ func scanStream(
 	}
 	closeGroup()
 
-	return scanner.Err()
+	return version, scanner.Err()
 }
 
 // classifyGroup assigns a code and severity to a CodeQL diagnostic title.

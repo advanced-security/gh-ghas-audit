@@ -54,14 +54,14 @@ func TestInspectReportsBudgetSkips(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			client := &archiveClient{archive: emptyArchive(t)}
 			fetcher := NewFetcher(client, test.limits)
-			_, err := fetcher.Inspect(context.Background(), "org", "one", 1)
+			_, _, err := fetcher.Inspect(context.Background(), "org", "one", 1)
 			if test.firstSucceeds && err != nil {
 				t.Fatal(err)
 			}
 			if !test.firstSucceeds && !errors.Is(err, ErrBudgetExhausted) {
 				t.Fatalf("oversized archive must be incomplete, got %v", err)
 			}
-			_, err = fetcher.Inspect(context.Background(), "org", "two", 2)
+			_, _, err = fetcher.Inspect(context.Background(), "org", "two", 2)
 			if !errors.Is(err, ErrBudgetExhausted) {
 				t.Fatalf("budget skip must not look clean, got %v", err)
 			}
@@ -76,7 +76,7 @@ func TestInspectReportsUnavailableLogs(t *testing.T) {
 	for _, status := range []int{http.StatusForbidden, http.StatusNotFound} {
 		apiErr := &ghapi.StatusError{StatusCode: status, Message: "logs unavailable"}
 		fetcher := NewFetcher(&archiveClient{err: apiErr}, Limits{})
-		_, err := fetcher.Inspect(context.Background(), "org", "repo", 1)
+		_, _, err := fetcher.Inspect(context.Background(), "org", "repo", 1)
 		if !errors.Is(err, apiErr) {
 			t.Fatalf("unread logs must propagate their error, got %v", err)
 		}
@@ -93,7 +93,7 @@ func TestConcurrentInspectionHonorsTotalBytes(t *testing.T) {
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
-			_, err := fetcher.Inspect(context.Background(), "org", "repo", int64(index))
+			_, _, err := fetcher.Inspect(context.Background(), "org", "repo", int64(index))
 			if err == nil {
 				completed.Add(1)
 			} else if !errors.Is(err, ErrBudgetExhausted) {
@@ -113,7 +113,7 @@ func TestCancelledInspectionDoesNotDownload(t *testing.T) {
 	fetcher := NewFetcher(client, Limits{})
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := fetcher.Inspect(ctx, "org", "repo", 1); !errors.Is(err, context.Canceled) {
+	if _, _, err := fetcher.Inspect(ctx, "org", "repo", 1); !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected cancellation, got %v", err)
 	}
 	if client.calls.Load() != 0 {

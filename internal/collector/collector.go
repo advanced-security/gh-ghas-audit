@@ -576,7 +576,13 @@ func (c *Collector) applySarifDiagnostics(ctx context.Context, repo *model.Repo)
 
 	var analyses []sarif.Analysis
 	for _, state := range repo.Languages {
-		if state.AnalysisID != 0 {
+		if state.AnalysisID != 0 && state.AnalysisError == "" {
+			// An analysis GitHub already recorded an error against never
+			// produced results, so its SARIF representation does not exist
+			// and requesting it always fails with HTTP 422. Skipping it
+			// avoids a guaranteed-failing request and a redundant error that
+			// would otherwise mark the whole report incomplete for a
+			// language whose failure is already fully explained elsewhere.
 			analyses = append(analyses, sarif.Analysis{Language: state.Language, AnalysisID: state.AnalysisID})
 		}
 	}
@@ -637,7 +643,7 @@ func (c *Collector) applySarifDiagnostics(ctx context.Context, repo *model.Repo)
 		repo.Errors = append(repo.Errors, message)
 		for index := range repo.Languages {
 			state := &repo.Languages[index]
-			if state.AnalysisID != 0 && !state.SARIFCollected {
+			if state.AnalysisID != 0 && state.AnalysisError == "" && !state.SARIFCollected {
 				state.SARIFError = message
 			}
 		}

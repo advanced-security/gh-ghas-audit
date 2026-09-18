@@ -17,12 +17,16 @@ type fakeSarifFetcher struct {
 	results map[model.Language]*sarif.Result
 	err     error
 	calls   int
+	// lastAnalyses records what the collector asked to inspect, so a test
+	// can assert an already-errored analysis was never requested.
+	lastAnalyses []sarif.Analysis
 }
 
 func (f *fakeSarifFetcher) Inspect(
-	_ context.Context, _, _ string, _ []sarif.Analysis,
+	_ context.Context, _, _ string, analyses []sarif.Analysis,
 ) (map[model.Language]*sarif.Result, error) {
 	f.calls++
+	f.lastAnalyses = analyses
 	return f.results, f.err
 }
 
@@ -264,6 +268,61 @@ func TestSarifDiagnosticsSkipsUnmatchedCategoryForAnUndetectedLanguage(t *testin
 		if state.Language == model.LangRust {
 			t.Fatalf("no LanguageState must be fabricated for an undetected language: %+v", state)
 		}
+	}
+}
+
+// A CodeQL analysis GitHub already recorded an error against (for example a
+// failed extraction) never produced results, so requesting its SARIF always
+// fails with HTTP 422. That analysis must never be requested at all, both to
+// avoid a guaranteed-failing request and to avoid a redundant error marking
+// the whole report incomplete for a failure already fully explained by
+// AnalysisError.
+func TestSarifDiagnosticsSkipsAnalysesWithAKnownAnalysisError(t *testing.T) {
+	client := buildClient(t, scenario{
+		name:      "sarif-known-error",
+		languages: []string{"Java", "C++"},
+		defaultSetup: defaultSetup{
+			State: "configured", Languages: []string{"java-kotlin", "c-cpp"},
+		},
+		workflows: codeqlWorkflows(), runs: map[string]any{"": runList("success", time.Hour)},
+		jobs:      jobsFor(map[string]string{"java-kotlin": "success", "c-cpp": "success"}),
+		databases: databasesFor([]string{"java", "c-cpp"}, time.Hour),
+	})
+	client.set("repos/"+testOrg+"/sarif-known-error/code-scanning/analyses", analysesFor([]codeScanningAnalysis{
+		{Category: "/language:java-kotlin", Error: "unsuccessful execution, exit code: 0, description:  ", AnalysisID: 42},
+		{Category: "/language:c-cpp", Results: 12, AnalysisID: 43},
+	}, time.Hour))
+
+	fetcher := &fakeSarifFetcher{results: map[model.Language]*sarif.Result{
+		model.LangCCpp: {CodeQLVersion: "2.20.3", ResultsByLevel: map[string]int{}},
+	}}
+
+	options := defaultActivityOptions()
+	options.Depth = DepthDiagnostics
+	options.DeepDiagnostics = DeepDiagnosticsAll
+	options.SarifFetcher = fetcher
+
+	report := collect(t, client, options)
+	repo := findRepo(t, report, "sarif-known-error")
+
+	for _, analysis := range fetcher.lastAnalyses {
+		if analysis.Language == model.LangJavaKotlin {
+			t.Fatalf("SARIF must never be requested for an analysis with a known error: %+v", fetcher.lastAnalyses)
+		}
+	}
+	if len(repo.Errors) != 0 || repo.Status.Incomplete || report.Stats.Incomplete {
+		t.Fatalf("an already-explained analysis error must not mark the report incomplete: errors=%v incomplete=%v",
+			repo.Errors, repo.Status.Incomplete)
+	}
+
+	var ccppState *model.LanguageState
+	for index := range repo.Languages {
+		if repo.Languages[index].Language == model.LangCCpp {
+			ccppState = &repo.Languages[index]
+		}
+	}
+	if ccppState == nil || !ccppState.SARIFCollected {
+		t.Fatalf("the healthy language must still get its SARIF collected: %+v", ccppState)
 	}
 }
 

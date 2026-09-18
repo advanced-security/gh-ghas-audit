@@ -295,6 +295,45 @@ func TestWriteCSVMarksIncompleteEvidence(t *testing.T) {
 	}
 }
 
+// The repository-level CSV is meant to answer "what CodeQL evidence exists"
+// without requiring a separate language-csv export, so the two SARIF-derived
+// aggregate columns must actually be populated with the tagged
+// "value[language]" summaries, not just present as empty headers.
+func TestWriteCSVIncludesCodeqlVersionAndQueryPacksColumns(t *testing.T) {
+	report := sampleReport()
+	repo := &report.Repositories[0]
+	repo.Languages[0].SARIFCollected = true
+	repo.Languages[0].CodeQLVersion = "2.20.3"
+	repo.Languages[0].QueryPacks = []string{"codeql/java-queries@1.2.3"}
+
+	var buffer bytes.Buffer
+	if err := WriteCSV(&buffer, report, nil); err != nil {
+		t.Fatalf("WriteCSV returned an error: %v", err)
+	}
+
+	records, err := csv.NewReader(&buffer).ReadAll()
+	if err != nil {
+		t.Fatalf("emitted CSV is not parseable: %v", err)
+	}
+	index := map[string]int{}
+	for position, name := range records[0] {
+		index[name] = position
+	}
+
+	if got, want := records[1][index["CodeQL version"]], "2.20.3[java-kotlin]"; got != want {
+		t.Errorf("CodeQL version column = %q, want %q", got, want)
+	}
+	if got, want := records[1][index["Query packs"]], "codeql/java-queries@1.2.3[java-kotlin]"; got != want {
+		t.Errorf("Query packs column = %q, want %q", got, want)
+	}
+	// A repository with no SARIF collected must render blank, not a stray
+	// separator or a panic on an empty language list.
+	if records[2][index["CodeQL version"]] != "" || records[2][index["Query packs"]] != "" {
+		t.Errorf("expected blank CodeQL evidence columns for a repo without SARIF, got %q / %q",
+			records[2][index["CodeQL version"]], records[2][index["Query packs"]])
+	}
+}
+
 func TestWriteLanguageCSVEmitsOneRowPerLanguage(t *testing.T) {
 	var buffer bytes.Buffer
 	if err := WriteLanguageCSV(&buffer, sampleReport(), []string{"application"}); err != nil {

@@ -131,6 +131,76 @@ func TestSarifSummaryIsEmptyWithoutAnyAttempt(t *testing.T) {
 	}
 }
 
+// Languages that share the same CodeQL CLI version are grouped into one
+// entry so a reader is not left guessing whether "2.20.3" applies to every
+// language; a differing version (a partial CLI upgrade) still stands out as
+// its own tagged group.
+func TestCodeqlVersionSummaryGroupsSharedVersionsAndTagsMismatches(t *testing.T) {
+	states := []model.LanguageState{
+		{Language: model.LangJavaKotlin, SARIFCollected: true, CodeQLVersion: "2.20.3"},
+		{Language: model.LangCSharp, SARIFCollected: true, CodeQLVersion: "2.20.3"},
+		{Language: model.LangPython, SARIFCollected: true, CodeQLVersion: "2.19.1"},
+		// Never collected, so it must not contribute a stray empty group.
+		{Language: model.LangGo},
+	}
+	want := "2.20.3[java-kotlin, csharp]; 2.19.1[python]"
+	if got := codeqlVersionSummary(states); got != want {
+		t.Fatalf("codeqlVersionSummary = %q, want %q", got, want)
+	}
+}
+
+func TestCodeqlVersionSummaryIsEmptyWithoutAnyCollectedVersion(t *testing.T) {
+	states := []model.LanguageState{{Language: model.LangGo}, {Language: model.LangPython, SARIFError: "budget exhausted"}}
+	if got := codeqlVersionSummary(states); got != "" {
+		t.Fatalf("codeqlVersionSummary = %q, want empty", got)
+	}
+}
+
+// Query packs are tagged per language because, unlike a CodeQL version,
+// packs are never expected to be shared across languages, and a mismatched
+// SARIFLanguage must not be silently merged into the wrong language's list.
+func TestQueryPacksSummaryTagsEveryPackWithItsLanguage(t *testing.T) {
+	states := []model.LanguageState{
+		{Language: model.LangJavaKotlin, SARIFCollected: true, QueryPacks: []string{"codeql/java-queries@1.2.3", "codeql/java-security-extended@1.2.3"}},
+		{Language: model.LangPython, SARIFCollected: true, QueryPacks: []string{"codeql/python-queries@0.9.1"}},
+		// Never collected, so its (absent) packs must not appear.
+		{Language: model.LangGo, SARIFError: "analysis SARIF is unavailable"},
+	}
+	want := "codeql/java-queries@1.2.3[java-kotlin]; codeql/java-security-extended@1.2.3[java-kotlin]; codeql/python-queries@0.9.1[python]"
+	if got := queryPacksSummary(states); got != want {
+		t.Fatalf("queryPacksSummary = %q, want %q", got, want)
+	}
+}
+
+func TestQueryPacksSummaryIsEmptyWithoutAnyCollectedPacks(t *testing.T) {
+	states := []model.LanguageState{{Language: model.LangGo}}
+	if got := queryPacksSummary(states); got != "" {
+		t.Fatalf("queryPacksSummary = %q, want empty", got)
+	}
+}
+
+// The table's new evidence columns must actually reach the rendered output,
+// not just the helper functions in isolation.
+func TestWriteTableIncludesCodeqlVersionAndQueryPacksColumns(t *testing.T) {
+	report := sampleReport()
+	repo := &report.Repositories[0]
+	repo.Languages[0].SARIFCollected = true
+	repo.Languages[0].CodeQLVersion = "2.20.3"
+	repo.Languages[0].QueryPacks = []string{"codeql/java-queries@1.2.3"}
+
+	var buffer bytes.Buffer
+	if err := WriteTable(&buffer, report, TableOptions{Width: 200}); err != nil {
+		t.Fatal(err)
+	}
+	output := buffer.String()
+	if !strings.Contains(output, "CODEQL VERSION") || !strings.Contains(output, "QUERY PACKS") {
+		t.Fatalf("table is missing the new evidence column headers:\n%s", output)
+	}
+	if !strings.Contains(output, "2.20.3[java-kotlin]") || !strings.Contains(output, "codeql/java-queries@1.2.3[java-kotlin]") {
+		t.Fatalf("table did not render the new evidence columns:\n%s", output)
+	}
+}
+
 func TestWriteTableRespectsTerminalColors(t *testing.T) {
 	original := color.NoColor
 	color.NoColor = false

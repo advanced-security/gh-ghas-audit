@@ -84,7 +84,7 @@ func WriteTable(writer io.Writer, report *model.Report, opts TableOptions) error
 	// "HEALTH" rather than "STATUS" because the report exposes four distinct
 	// status dimensions, and because organizations often define a custom
 	// property literally named "status".
-	headers := []string{"HEALTH", "REPOSITORY", "CONFIG", "EXECUTION", "LAST SCAN", "LANGUAGES"}
+	headers := []string{"HEALTH", "REPOSITORY", "CONFIG", "EXECUTION", "LAST SCAN", "LANGUAGES", "CODEQL VERSION", "QUERY PACKS"}
 	for _, property := range opts.Properties {
 		headers = append(headers, strings.ToUpper(property))
 	}
@@ -104,6 +104,8 @@ func WriteTable(writer io.Writer, report *model.Report, opts TableOptions) error
 		printer.AddField(executionCell(repo), tableprinter.WithTruncate(nil))
 		printer.AddField(lastScanCell(repo), tableprinter.WithTruncate(nil))
 		printer.AddField(languageCell(repo), tableprinter.WithTruncate(nil))
+		printer.AddField(codeqlVersionSummary(repo.Languages), tableprinter.WithTruncate(nil))
+		printer.AddField(queryPacksSummary(repo.Languages), tableprinter.WithTruncate(nil))
 		for _, property := range opts.Properties {
 			value, _ := model.PropertyValue(repo.Properties, property)
 			printer.AddField(value, tableprinter.WithTruncate(nil))
@@ -349,6 +351,52 @@ func containsLanguage(languages []model.Language, wanted model.Language) bool {
 		}
 	}
 	return false
+}
+
+// codeqlVersionSummary aggregates the CodeQL CLI versions SARIF reported
+// across a repository's languages. Languages that share the same version are
+// grouped together and every group is tagged "version[language, ...]", the
+// same "value[language]" convention joinDiagnostics uses, so a reader never
+// has to guess whether a single version shown applies to every language or
+// just one - which matters because a repository mixing CodeQL versions across
+// languages (for example after a partial CLI upgrade) is worth noticing.
+func codeqlVersionSummary(states []model.LanguageState) string {
+	var order []string
+	groups := map[string][]model.Language{}
+	for _, state := range states {
+		if !state.SARIFCollected || state.CodeQLVersion == "" {
+			continue
+		}
+		if _, ok := groups[state.CodeQLVersion]; !ok {
+			order = append(order, state.CodeQLVersion)
+		}
+		groups[state.CodeQLVersion] = append(groups[state.CodeQLVersion], state.Language)
+	}
+	if len(order) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(order))
+	for _, version := range order {
+		parts = append(parts, fmt.Sprintf("%s[%s]", version, model.JoinLanguages(groups[version])))
+	}
+	return strings.Join(parts, "; ")
+}
+
+// queryPacksSummary lists every query pack SARIF reported across a
+// repository's languages, tagging each pack "name@version[language]" so packs
+// from different languages - or a SARIFLanguage that disagrees with the
+// analysis category - are never conflated into one undifferentiated list.
+func queryPacksSummary(states []model.LanguageState) string {
+	var parts []string
+	for _, state := range states {
+		if !state.SARIFCollected {
+			continue
+		}
+		for _, pack := range state.QueryPacks {
+			parts = append(parts, fmt.Sprintf("%s[%s]", pack, state.Language))
+		}
+	}
+	return strings.Join(parts, "; ")
 }
 
 // sarifSummary condenses per-language SARIF detail (collected/mismatched/

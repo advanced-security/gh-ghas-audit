@@ -140,7 +140,7 @@ gh ghas-audit code-scanning -o my-org --fail-on failing,stalled
 
 JSON is the canonical report. `schema_version` versions the data contract independently of the CLI release; `settings.scan_depth` records the evidence tier. NDJSON emits a report header followed by repository records after collection completes.
 
-Repository CSV includes the four dimensions, language lists, run links, configuration, diagnostics, reasons and errors. Language CSV includes per-language analysis evidence, errors, and (at diagnostics depth, unless `--no-sarif`) SARIF-derived query pack, rule count, results-by-level, artifact count and language cross-check fields. Both include `Evidence complete`; custom properties add `Property: NAME` columns.
+Repository CSV includes the four dimensions, language lists, run links, configuration, diagnostics, reasons and errors, plus (at diagnostics depth, unless `--no-sarif`) a `CodeQL version` and `Query packs` column aggregated across the repository's languages. Language CSV includes per-language analysis evidence, errors, and (at diagnostics depth, unless `--no-sarif`) SARIF-derived query pack, rule count, results-by-level, artifact count and language cross-check fields. Both include `Evidence complete`; custom properties add `Property: NAME` columns.
 
 Each language records `runtime_evaluation`: `not-evaluated`, `evaluated` or `incomplete`. Uncollected `analyzed`/`succeeded` values are null in JSON/NDJSON and blank in language CSV.
 
@@ -191,7 +191,7 @@ At diagnostics depth, each default-branch language analysis's SARIF representati
 
 Only structural SARIF fields are read. Result messages, locations and source snippets are never parsed or retained. SARIF downloads share the `--deep-scope` selection with log inspection but have their own repository and byte budgets (`--deep-diagnostics-max-sarif-mb`, defaulting to 1024 MiB), so a large SARIF response cannot exhaust the log budget or vice versa. Like logs, SARIF bodies bypass the on-disk cache and are never persisted beyond the fields above.
 
-These fields appear in JSON, NDJSON and language CSV. The terminal table condenses them into a single per-repository `SARIF N/M collected` note in `--detailed` mode, alongside any mismatch or SARIF-error languages.
+These fields appear in JSON, NDJSON and language CSV. The terminal table and repository CSV also show a `CODEQL VERSION`/`CodeQL version` and `QUERY PACKS`/`Query packs` column, each aggregated across every language in the repository. Languages that share the same CodeQL version are grouped together; every entry is tagged `value[language, ...]` so multi-language repositories never leave it ambiguous which language a version or pack belongs to, for example `2.20.3[java-kotlin, csharp]; 2.19.1[python]`. The table's `--detailed` mode additionally shows a single per-repository `SARIF N/M collected` note, alongside any mismatch or SARIF-error languages.
 
 ## Permissions and limitations
 

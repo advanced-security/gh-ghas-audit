@@ -441,8 +441,15 @@ func (c *Client) do(ctx context.Context, target, etag string, limit int64, accep
 	if limit > 0 {
 		// One extra byte distinguishes "exactly at the limit" from
 		// "truncated", so an oversized archive can be reported rather than
-		// silently analyzed as if it were complete.
-		reader = io.LimitReader(resp.Body, limit+1)
+		// silently analyzed as if it were complete. Guard against overflow:
+		// callers may pass math.MaxInt64 to mean "unlimited" (--*-max-mb 0),
+		// and limit+1 on that sentinel wraps to a negative number, which
+		// io.LimitReader treats as a zero-byte read.
+		readLimit := limit
+		if readLimit < math.MaxInt64 {
+			readLimit++
+		}
+		reader = io.LimitReader(resp.Body, readLimit)
 	}
 
 	body, err := io.ReadAll(reader)

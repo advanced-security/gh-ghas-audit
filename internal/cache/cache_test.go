@@ -132,7 +132,6 @@ func TestSizeOfDisabledCacheIsZero(t *testing.T) {
 	}
 }
 
-
 func TestSchemaChangesReplaceTheSameCacheEntry(t *testing.T) {
 	dir := t.TempDir()
 	for _, schema := range []string{"v1", "v2", "v3"} {

@@ -85,6 +85,51 @@ func TestParseInfersLanguageFromRuleIDWhenPacksAreAbsent(t *testing.T) {
 	}
 }
 
+// A minimal, hand-built SARIF document can carry results without ever
+// declaring them under tool.driver.rules or an extension; the rule-ID
+// fallback must still inspect results[].ruleId, without counting those rule
+// IDs into RuleCount, which only reflects declared rules.
+func TestParseInfersLanguageFromResultRuleIDWhenRulesAreUndeclared(t *testing.T) {
+	const doc = `{
+		"runs": [{
+			"tool": {"driver": {"name": "CodeQL"}},
+			"results": [{"ruleId": "cs/sql-injection", "level": "error"}]
+		}]
+	}`
+	result, err := Parse([]byte(doc))
+	if err != nil {
+		t.Fatalf("Parse returned an error: %v", err)
+	}
+	if result.Language != model.LangCSharp {
+		t.Errorf("Language = %q, want %q", result.Language, model.LangCSharp)
+	}
+	if result.RuleCount != 0 {
+		t.Errorf("RuleCount = %d, want 0 (results are not declared rules)", result.RuleCount)
+	}
+}
+
+// A custom or org-specific query pack keeps the language prefix but appends
+// its own suffix, e.g. "octo-org/csharp-extra-queries", which does not match
+// any packPrefixLanguages key exactly; the prefix must still resolve.
+func TestParseInfersLanguageFromCustomQueryPackSuffix(t *testing.T) {
+	const doc = `{
+		"runs": [{
+			"tool": {
+				"driver": {"name": "CodeQL"},
+				"extensions": [{"name": "octo-org/csharp-extra-queries", "rules": [{"id": "cs/sql-injection"}]}]
+			},
+			"results": [{"ruleId": "cs/sql-injection", "level": "error"}]
+		}]
+	}`
+	result, err := Parse([]byte(doc))
+	if err != nil {
+		t.Fatalf("Parse returned an error: %v", err)
+	}
+	if result.Language != model.LangCSharp {
+		t.Errorf("Language = %q, want %q", result.Language, model.LangCSharp)
+	}
+}
+
 // A clean analysis with zero findings is a legitimate, common outcome and
 // must be distinguishable from a SARIF document that could not be parsed.
 func TestParseHandlesZeroResults(t *testing.T) {

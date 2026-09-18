@@ -184,6 +184,9 @@ func (c *Collector) collectRepository(ctx context.Context, org string, source ap
 		repo.Errors = append(repo.Errors, fmt.Sprintf("analyses: %v", err))
 	}
 	applyAnalyses(report, languages, evidence, repo.Execution.LatestCompletedRun)
+	if report != nil {
+		repo.PendingSARIFAnalyses = report.Unmatched
+	}
 
 	finalizeLanguages(&repo, languages)
 	repo.Status.Freshness = c.freshness(&repo)
@@ -383,6 +386,12 @@ type analysisReport struct {
 	// DefaultSetup reports whether that workflow is the managed default setup
 	// workflow rather than one the repository controls.
 	DefaultSetup bool
+	// Unmatched carries analyses whose category did not resolve to a known
+	// language by name alone (custom or API-based uploads are not guaranteed
+	// to follow the "language:<name>" convention). They are kept, one per
+	// distinct category, so a SARIF-based language cross-check can still run
+	// for them instead of silently dropping their AnalysisID.
+	Unmatched []model.PendingSARIFAnalysis
 }
 
 // analysisCategoryPattern extracts the language from an analysis category such
@@ -508,11 +517,14 @@ func (c *Collector) collectAnalyses(
 		}
 
 		match := analysisCategoryPattern.FindStringSubmatch(analysis.Category)
-		if match == nil {
-			continue
+		language, ok := model.Language(""), false
+		if match != nil {
+			language, ok = model.NormalizeLanguage(match[1])
 		}
-		language, ok := model.NormalizeLanguage(match[1])
 		if !ok {
+			if analysis.AnalysisID != 0 {
+				report.recordUnmatched(analysis.Category, analysis.AnalysisID)
+			}
 			continue
 		}
 		// Newest first, so an existing entry is already the current one.
@@ -528,6 +540,20 @@ func (c *Collector) collectAnalyses(
 	}
 
 	return report, nil
+}
+
+// recordUnmatched keeps the newest analysis ID for one distinct category that
+// did not resolve to a known language, so applySarifDiagnostics can still
+// attempt a SARIF-based language cross-check for it later.
+func (r *analysisReport) recordUnmatched(category string, analysisID int64) {
+	for _, existing := range r.Unmatched {
+		if existing.Category == category {
+			// Analyses are visited newest first; the first one seen for this
+			// category is already the current one.
+			return
+		}
+	}
+	r.Unmatched = append(r.Unmatched, model.PendingSARIFAnalysis{AnalysisID: analysisID, Category: category})
 }
 
 // applyAnalyses records per-language analysis evidence.
@@ -648,6 +674,7 @@ func (c *Collector) evaluateAdvancedSetup(
 	repo.ConfiguredLanguages = configured
 
 	applyAnalyses(report, languages, evidence, repo.Execution.LatestCompletedRun)
+	repo.PendingSARIFAnalyses = report.Unmatched
 
 	finalizeLanguages(repo, languages)
 	repo.Status.Freshness = c.freshness(repo)

@@ -3,7 +3,9 @@ package ghapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -332,6 +334,49 @@ func TestPlainForbiddenIsNotTreatedAsRateLimit(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "Advanced Security") {
 		t.Fatalf("error should preserve the API message, got %v", err)
+	}
+}
+
+// GetBytesLimited and GetSARIFLimited are used with math.MaxInt64 to mean
+// "unlimited" (the CLI's --deep-diagnostics-max-mb/-max-sarif-mb 0). Adding
+// one to that sentinel to build the "one extra byte" truncation check must
+// not overflow into a negative limit, which io.LimitReader would treat as a
+// zero-byte read and silently discard every download.
+func TestUnlimitedByteBudgetDoesNotOverflowTheResponseLimiter(t *testing.T) {
+	const want = "hello from an unlimited download"
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(writer, want)
+	}))
+	defer server.Close()
+
+	body, err := newTestClient(server, nil).GetBytesLimited(context.Background(), "thing", math.MaxInt64)
+	if err != nil {
+		t.Fatalf("unlimited GetBytesLimited returned an error: %v", err)
+	}
+	if string(body) != want {
+		t.Fatalf("GetBytesLimited(math.MaxInt64) = %q, want %q", body, want)
+	}
+}
+
+// A finite limit must still behave: a response under the cap is returned in
+// full, and a response over the cap is reported rather than truncated.
+func TestFiniteByteBudgetStillEnforcesTheLimit(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(writer, "0123456789")
+	}))
+	defer server.Close()
+	client := newTestClient(server, nil)
+
+	body, err := client.GetBytesLimited(context.Background(), "thing", 10)
+	if err != nil {
+		t.Fatalf("response at exactly the limit should succeed: %v", err)
+	}
+	if string(body) != "0123456789" {
+		t.Fatalf("GetBytesLimited(10) = %q, want the full 10 byte body", body)
+	}
+
+	if _, err := client.GetBytesLimited(context.Background(), "thing", 5); !errors.Is(err, ErrResponseTooLarge) {
+		t.Fatalf("response over the limit should be reported as too large, got %v", err)
 	}
 }
 

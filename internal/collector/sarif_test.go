@@ -186,6 +186,87 @@ func TestSarifDiagnosticsFailureKeepsPartialResultsAndMarksIncomplete(t *testing
 	}
 }
 
+// A custom workflow or API-based upload is not guaranteed to name its
+// category "language:<name>", so its analysis would otherwise be dropped
+// before SARIF collection ever sees it. Its SARIF must still be fetched
+// under a placeholder key and, once the SARIF names a language that already
+// has a LanguageState (from default setup or detected-language evidence),
+// attached to it, with the AnalysisID set retroactively.
+func TestSarifDiagnosticsAttachUnmatchedCategoryAnalysisByInferredLanguage(t *testing.T) {
+	client := buildClient(t, goScenario("sarif-custom-category"))
+	client.set("repos/"+testOrg+"/sarif-custom-category/code-scanning/analyses", analysesFor([]codeScanningAnalysis{
+		{Category: "my-custom-scanner", Results: 3, AnalysisID: 999},
+	}, time.Hour))
+
+	fetcher := &fakeSarifFetcher{results: map[model.Language]*sarif.Result{
+		model.Language("_pending-sarif:999"): {
+			Language:       model.LangGo,
+			CodeQLVersion:  "2.20.3",
+			ResultsByLevel: map[string]int{"warning": 3},
+		},
+	}}
+
+	options := defaultActivityOptions()
+	options.Depth = DepthDiagnostics
+	options.DeepDiagnostics = DeepDiagnosticsAll
+	options.SarifFetcher = fetcher
+
+	repo := findRepo(t, collect(t, client, options), "sarif-custom-category")
+
+	var state *model.LanguageState
+	for index := range repo.Languages {
+		if repo.Languages[index].Language == model.LangGo {
+			state = &repo.Languages[index]
+		}
+	}
+	if state == nil {
+		t.Fatal("go language state missing from the report")
+	}
+	if state.AnalysisID != 999 {
+		t.Errorf("AnalysisID = %d, want 999 set retroactively from the unmatched-category analysis", state.AnalysisID)
+	}
+	if !state.SARIFCollected {
+		t.Fatal("SARIFCollected must be true once the unmatched-category SARIF is attached")
+	}
+	if state.CodeQLVersion != "2.20.3" {
+		t.Errorf("CodeQLVersion = %q, want 2.20.3", state.CodeQLVersion)
+	}
+	if repo.PendingSARIFAnalyses != nil {
+		t.Errorf("PendingSARIFAnalyses must be cleared after use, got %+v", repo.PendingSARIFAnalyses)
+	}
+}
+
+// When an unmatched-category analysis's SARIF names a language with no
+// existing LanguageState, it must be safely skipped rather than fabricating a
+// new row, which would desynchronize the already-finalized coverage counts.
+func TestSarifDiagnosticsSkipsUnmatchedCategoryForAnUndetectedLanguage(t *testing.T) {
+	client := buildClient(t, goScenario("sarif-custom-orphan"))
+	client.set("repos/"+testOrg+"/sarif-custom-orphan/code-scanning/analyses", analysesFor([]codeScanningAnalysis{
+		{Category: "my-custom-scanner", Results: 3, AnalysisID: 999},
+	}, time.Hour))
+
+	fetcher := &fakeSarifFetcher{results: map[model.Language]*sarif.Result{
+		model.Language("_pending-sarif:999"): {
+			Language:      model.LangRust,
+			CodeQLVersion: "2.20.3",
+		},
+	}}
+
+	options := defaultActivityOptions()
+	options.Depth = DepthDiagnostics
+	options.DeepDiagnostics = DeepDiagnosticsAll
+	options.SarifFetcher = fetcher
+
+	report := collect(t, client, options)
+	repo := findRepo(t, report, "sarif-custom-orphan")
+
+	for _, state := range repo.Languages {
+		if state.Language == model.LangRust {
+			t.Fatalf("no LanguageState must be fabricated for an undetected language: %+v", state)
+		}
+	}
+}
+
 // --deep-scope problematic must apply to SARIF exactly as it does to log
 // diagnostics: a healthy repository is not worth the extra download.
 func TestSarifDiagnosticsRespectsProblematicScope(t *testing.T) {

@@ -580,6 +580,19 @@ func (c *Collector) applySarifDiagnostics(ctx context.Context, repo *model.Repo)
 			analyses = append(analyses, sarif.Analysis{Language: state.Language, AnalysisID: state.AnalysisID})
 		}
 	}
+	// Analyses whose category did not resolve to a known language (custom or
+	// API-based uploads are not guaranteed to follow the "language:<name>"
+	// convention) still get their SARIF fetched, keyed by a placeholder that
+	// cannot collide with a real model.Language, so the cross-check below can
+	// still attach them to whichever LanguageState the SARIF itself names.
+	pending := repo.PendingSARIFAnalyses
+	repo.PendingSARIFAnalyses = nil
+	placeholders := make(map[model.Language]int64, len(pending))
+	for _, analysis := range pending {
+		key := model.Language(fmt.Sprintf("_pending-sarif:%d", analysis.AnalysisID))
+		placeholders[key] = analysis.AnalysisID
+		analyses = append(analyses, sarif.Analysis{Language: key, AnalysisID: analysis.AnalysisID})
+	}
 	if len(analyses) == 0 {
 		return
 	}
@@ -593,6 +606,25 @@ func (c *Collector) applySarifDiagnostics(ctx context.Context, repo *model.Repo)
 		state := &repo.Languages[index]
 		if result, ok := results[state.Language]; ok {
 			applySarifResult(state, result)
+		}
+	}
+
+	// A pending analysis only ever augments a language that was already
+	// detected/configured through other evidence; it never fabricates a new
+	// LanguageState, because the "N/M languages" coverage counts are already
+	// finalized by this point and a synthesized row would desynchronize them.
+	for key, analysisID := range placeholders {
+		result, ok := results[key]
+		if !ok || result.Language == "" {
+			continue
+		}
+		for index := range repo.Languages {
+			state := &repo.Languages[index]
+			if state.Language == result.Language && state.AnalysisID == 0 {
+				state.AnalysisID = analysisID
+				applySarifResult(state, result)
+				break
+			}
 		}
 	}
 

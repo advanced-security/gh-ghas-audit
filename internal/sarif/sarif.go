@@ -398,6 +398,15 @@ func inferLanguage(run run, ruleIDs map[string]bool) model.Language {
 			return lang
 		}
 	}
+	// Declared tool/extension rules are absent from some minimal or
+	// hand-built SARIF documents; the results themselves still carry a
+	// ruleId, so fall back to those without folding them into RuleCount,
+	// which must only reflect declared rules.
+	for _, item := range run.Results {
+		if lang, ok := languageFromRuleID(item.RuleID); ok {
+			return lang
+		}
+	}
 	return ""
 }
 
@@ -409,8 +418,18 @@ func languageFromPackName(name string) (model.Language, bool) {
 		segment = segment[slash+1:]
 	}
 	segment = strings.TrimSuffix(segment, "-queries")
-	lang, ok := packPrefixLanguages[segment]
-	return lang, ok
+	if lang, ok := packPrefixLanguages[segment]; ok {
+		return lang, true
+	}
+	// A custom or org-specific pack often keeps the language prefix but adds
+	// its own suffix, e.g. "octo-org/csharp-extra-queries" trims to
+	// "csharp-extra"; match that prefix so custom query packs still resolve.
+	for prefix, lang := range packPrefixLanguages {
+		if strings.HasPrefix(segment, prefix+"-") {
+			return lang, true
+		}
+	}
+	return "", false
 }
 
 // languageFromRuleID extracts the language segment from a rule ID such as

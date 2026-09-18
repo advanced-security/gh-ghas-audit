@@ -351,6 +351,38 @@ func containsLanguage(languages []model.Language, wanted model.Language) bool {
 	return false
 }
 
+// sarifSummary condenses per-language SARIF detail (collected/mismatched/
+// failed) into a single line for the table's DETAIL column; the full
+// per-language breakdown is only exposed in the language CSV/JSON exports.
+func sarifSummary(repo model.Repo) string {
+	var collected, attempted int
+	var mismatched, failed []string
+	for _, state := range repo.Languages {
+		switch {
+		case state.SARIFCollected:
+			collected++
+			attempted++
+			if state.SARIFLanguageMismatch {
+				mismatched = append(mismatched, string(state.Language))
+			}
+		case state.SARIFError != "":
+			attempted++
+			failed = append(failed, string(state.Language))
+		}
+	}
+	if attempted == 0 {
+		return ""
+	}
+	summary := fmt.Sprintf("SARIF %d/%d collected", collected, attempted)
+	if len(mismatched) > 0 {
+		summary += "; language mismatch: " + strings.Join(mismatched, ", ")
+	}
+	if len(failed) > 0 {
+		summary += "; SARIF error: " + strings.Join(failed, ", ")
+	}
+	return summary
+}
+
 func detailCell(repo model.Repo) string {
 	parts := append([]string(nil), repo.Status.Reasons...)
 	for _, diagnostic := range repo.Diagnostics {
@@ -359,6 +391,9 @@ func detailCell(repo model.Repo) string {
 			message += " (from logs)"
 		}
 		parts = append(parts, message)
+	}
+	if summary := sarifSummary(repo); summary != "" {
+		parts = append(parts, summary)
 	}
 	parts = append(parts, repo.Errors...)
 	seen := make(map[string]bool, len(parts))

@@ -362,9 +362,10 @@ func resolveConfigurationStatus(setup *defaultSetup, setupErr error, attachment 
 // analysis. It comes from a stable, documented API, which makes it the
 // preferred source of failure attribution over parsing Actions logs.
 type analysisSummary struct {
-	CreatedAt *time.Time
-	Error     string
-	Results   int
+	CreatedAt  *time.Time
+	Error      string
+	Results    int
+	AnalysisID int64
 }
 
 // analysisReport is the result of reading a repository's code scanning
@@ -519,9 +520,10 @@ func (c *Collector) collectAnalyses(
 			continue
 		}
 		report.Languages[language] = &analysisSummary{
-			CreatedAt: analysis.CreatedAt,
-			Error:     strings.TrimSpace(analysis.Error),
-			Results:   analysis.Results,
+			CreatedAt:  analysis.CreatedAt,
+			Error:      strings.TrimSpace(analysis.Error),
+			Results:    analysis.Results,
+			AnalysisID: analysis.AnalysisID,
 		}
 	}
 
@@ -560,6 +562,7 @@ func applyAnalyses(
 		}
 		results := summary.Results
 		state.ResultsCount = &results
+		state.AnalysisID = summary.AnalysisID
 
 		if summary.Error != "" {
 			state.AnalysisError = summary.Error

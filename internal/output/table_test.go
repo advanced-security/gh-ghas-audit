@@ -97,6 +97,40 @@ func TestDetailedTableIncludesAllDiagnosticSources(t *testing.T) {
 	}
 }
 
+// SARIF detail is per-language, but the table's DETAIL column is
+// repository-scoped: it must condense every language into a single line
+// rather than reproducing the full per-language breakdown that language-csv
+// already exports.
+func TestSarifSummaryCondensesPerLanguageDetail(t *testing.T) {
+	rule := 3
+	repo := model.Repo{
+		Languages: []model.LanguageState{
+			{Language: model.LangGo, SARIFCollected: true, RuleCount: &rule},
+			{Language: model.LangPython, SARIFCollected: true, SARIFLanguageMismatch: true},
+			{Language: model.LangJavaKotlin, SARIFError: "analysis SARIF is unavailable, likely expired"},
+			// Never attempted: no SarifFetcher, or --deep-scope excluded it.
+			{Language: model.LangCSharp},
+		},
+	}
+	want := "SARIF 2/3 collected; language mismatch: python; SARIF error: java-kotlin"
+	if got := sarifSummary(repo); got != want {
+		t.Fatalf("sarifSummary = %q, want %q", got, want)
+	}
+	if got := detailCell(repo); !strings.Contains(got, want) {
+		t.Fatalf("detail cell = %q, want it to contain %q", got, want)
+	}
+}
+
+// A repository where SARIF was never attempted for any language (no
+// SarifFetcher, or a scan depth below diagnostics) must not print a SARIF
+// note at all.
+func TestSarifSummaryIsEmptyWithoutAnyAttempt(t *testing.T) {
+	repo := model.Repo{Languages: []model.LanguageState{{Language: model.LangGo}}}
+	if got := sarifSummary(repo); got != "" {
+		t.Fatalf("sarifSummary = %q, want empty when SARIF was never attempted", got)
+	}
+}
+
 func TestWriteTableRespectsTerminalColors(t *testing.T) {
 	original := color.NoColor
 	color.NoColor = false

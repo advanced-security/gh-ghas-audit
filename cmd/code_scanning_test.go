@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -99,14 +100,43 @@ func TestVersionUsesReleaseOverride(t *testing.T) {
 }
 
 func TestUnifiedCommandRejectsInvalidLimits(t *testing.T) {
-	for _, flag := range []string{"--concurrency", "--deep-diagnostics-max-repos", "--deep-diagnostics-max-mb"} {
+	root := newRootCommand()
+	root.SetOut(&bytes.Buffer{})
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{"code-scanning", "-o", "org", "--concurrency", "0"})
+	if err := root.Execute(); err == nil || !strings.Contains(err.Error(), "must be at least 1") {
+		t.Fatalf("invalid --concurrency reached collection: %v", err)
+	}
+}
+
+// A 0 value on the diagnostics budget flags means "unlimited" (Full Audit
+// Mode), not "invalid"; only a negative value is rejected.
+func TestUnifiedCommandRejectsNegativeDiagnosticsLimits(t *testing.T) {
+	for _, flag := range []string{
+		"--deep-diagnostics-max-repos", "--deep-diagnostics-max-mb", "--deep-diagnostics-max-sarif-mb",
+	} {
 		root := newRootCommand()
 		root.SetOut(&bytes.Buffer{})
 		root.SetErr(&bytes.Buffer{})
-		root.SetArgs([]string{"code-scanning", "-o", "org", flag, "0"})
-		if err := root.Execute(); err == nil || !strings.Contains(err.Error(), "must be at least 1") {
+		root.SetArgs([]string{"code-scanning", "-o", "org", flag, "-1"})
+		if err := root.Execute(); err == nil || !strings.Contains(err.Error(), "cannot be negative") {
 			t.Fatalf("invalid %s reached collection: %v", flag, err)
 		}
+	}
+}
+
+func TestUnlimitedSentinels(t *testing.T) {
+	if got := unlimitedInt(0); got != math.MaxInt32 {
+		t.Fatalf("unlimitedInt(0) = %d, want MaxInt32", got)
+	}
+	if got := unlimitedInt(5); got != 5 {
+		t.Fatalf("unlimitedInt(5) = %d, want 5 unchanged", got)
+	}
+	if got := unlimitedBytes(0); got != math.MaxInt64 {
+		t.Fatalf("unlimitedBytes(0) = %d, want MaxInt64", got)
+	}
+	if got, want := unlimitedBytes(2), int64(2<<20); got != want {
+		t.Fatalf("unlimitedBytes(2) = %d, want %d", got, want)
 	}
 }
 

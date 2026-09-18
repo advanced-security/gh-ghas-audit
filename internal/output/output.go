@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -222,6 +223,15 @@ var languageCSVHeader = []string{
 	"Last analysis",
 	"Results",
 	"Analysis error",
+	"SARIF collected",
+	"SARIF error",
+	"SARIF language",
+	"SARIF language mismatch",
+	"CodeQL version",
+	"Query packs",
+	"Rule count",
+	"Results by level",
+	"Artifact count",
 	"Repository overall status",
 	"Evidence complete",
 	"Collection errors",
@@ -270,6 +280,15 @@ func WriteLanguageCSV(writer io.Writer, report *model.Report, propertyColumns []
 				formatTime(state.AnalysisCreatedAt),
 				formatCount(state.ResultsCount),
 				state.AnalysisError,
+				formatSARIFCollected(state),
+				state.SARIFError,
+				string(state.SARIFLanguage),
+				formatSARIFMismatch(state),
+				state.CodeQLVersion,
+				strings.Join(state.QueryPacks, "; "),
+				formatCount(state.RuleCount),
+				formatResultsByLevel(state.ResultsByLevel),
+				formatCount(state.ArtifactCount),
 				string(repo.Status.Overall),
 				// Without these, Analyzed=false reads as an observed fact even
 				// when the evidence simply could not be retrieved.
@@ -326,6 +345,46 @@ func formatCount(value *int) string {
 		return ""
 	}
 	return strconv.Itoa(*value)
+}
+
+// formatSARIFCollected distinguishes "SARIF was never attempted" (blank,
+// e.g. --no-sarif or shallower scan depth) from a definite success/failure,
+// so an empty column doesn't read as a failed download.
+func formatSARIFCollected(state model.LanguageState) string {
+	if state.SARIFCollected {
+		return "true"
+	}
+	if state.SARIFError != "" {
+		return "false"
+	}
+	return ""
+}
+
+// formatSARIFMismatch is only meaningful once SARIF was actually collected;
+// otherwise there is nothing to compare against the analysis category.
+func formatSARIFMismatch(state model.LanguageState) string {
+	if !state.SARIFCollected {
+		return ""
+	}
+	return strconv.FormatBool(state.SARIFLanguageMismatch)
+}
+
+// formatResultsByLevel renders SARIF result counts per severity level in a
+// stable, sorted "level=count" list.
+func formatResultsByLevel(counts map[string]int) string {
+	if len(counts) == 0 {
+		return ""
+	}
+	levels := make([]string, 0, len(counts))
+	for level := range counts {
+		levels = append(levels, level)
+	}
+	sort.Strings(levels)
+	parts := make([]string, 0, len(levels))
+	for _, level := range levels {
+		parts = append(parts, fmt.Sprintf("%s=%d", level, counts[level]))
+	}
+	return strings.Join(parts, "; ")
 }
 
 func formatDays(value *int) string {

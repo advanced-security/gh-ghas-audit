@@ -140,7 +140,7 @@ gh ghas-audit code-scanning -o my-org --fail-on failing,stalled
 
 JSON is the canonical report. `schema_version` versions the data contract independently of the CLI release; `settings.scan_depth` records the evidence tier. NDJSON emits a report header followed by repository records after collection completes.
 
-Repository CSV includes the four dimensions, language lists, run links, configuration, diagnostics, reasons and errors. Language CSV includes per-language analysis evidence and errors. Both include `Evidence complete`; custom properties add `Property: NAME` columns.
+Repository CSV includes the four dimensions, language lists, run links, configuration, diagnostics, reasons and errors. Language CSV includes per-language analysis evidence, errors, and (at diagnostics depth, unless `--no-sarif`) SARIF-derived query pack, rule count, results-by-level, artifact count and language cross-check fields. Both include `Evidence complete`; custom properties add `Property: NAME` columns.
 
 Each language records `runtime_evaluation`: `not-evaluated`, `evaluated` or `incomplete`. Uncollected `analyzed`/`succeeded` values are null in JSON/NDJSON and blank in language CSV.
 
@@ -161,8 +161,10 @@ Each language records `runtime_evaluation`: `not-evaluated`, `evaluated` or `inc
 | `--cache-max-age` | Unset | Ignore cache entries older than a duration |
 | `--refresh` | Off | Clear the cache before collection |
 | `--no-cache` | Off | Disable caching |
-| `--deep-diagnostics-max-repos` | `200` | Maximum repositories inspected for logs |
-| `--deep-diagnostics-max-mb` | `32` | Total compressed log download budget in MiB |
+| `--deep-diagnostics-max-repos` | `200` | Maximum repositories inspected for logs and SARIF at diagnostics depth; `0` means unlimited |
+| `--deep-diagnostics-max-mb` | `32` | Total compressed log download budget in MiB; `0` means unlimited |
+| `--no-sarif` | Off | Disable SARIF download at diagnostics depth; log inspection is unaffected |
+| `--deep-diagnostics-max-sarif-mb` | `1024` | Total SARIF download budget in MiB, independent of `--deep-diagnostics-max-mb`; `0` means unlimited |
 
 Inventory uses one GraphQL query per 50 repositories. Runtime evidence requires per-repository REST calls; repositories with more than 100 CodeQL analysis records require additional paginated requests. ETag revalidation saves primary quota but still makes network requests. Large organizations are batch workloads: use scope filters, caching and suitable API quotas.
 
@@ -177,12 +179,26 @@ Log downloads are serialized to enforce the shared byte budget; other collection
 
 Log findings carry `"source": "log"`. For example, low C# analysis quality or duplicate Java classes can make a successful workflow `degraded`; build-mode `none` suggestions do not.
 
+### SARIF cross-check
+
+At diagnostics depth, each default-branch language analysis's SARIF representation (`GET .../code-scanning/analyses/{id}` with `Accept: application/sarif+json`, the same endpoint and permission already used for its metadata) is also downloaded unless `--no-sarif` is set. This adds, per language:
+
+- `codeql_version`, `query_packs` and `rule_count`, read from the SARIF tool driver and its extensions.
+- `results_by_level`, a count of results by SARIF severity level.
+- `artifact_count`, the number of source artifacts SARIF recorded.
+- `sarif_language`, the language CodeQL actually scanned, inferred from query pack names and rule ID prefixes, independent of the analysis category string. This matters for custom or API-based CodeQL uploads, which are not guaranteed to use the same category names a default or advanced-setup workflow would.
+- `sarif_language_mismatch`, set when `sarif_language` disagrees with the analysis's own category-derived language. This is informational: a mismatch alone does not change a repository's overall status.
+
+Only structural SARIF fields are read. Result messages, locations and source snippets are never parsed or retained. SARIF downloads share the `--deep-scope` selection with log inspection but have their own repository and byte budgets (`--deep-diagnostics-max-sarif-mb`, defaulting to 1024 MiB), so a large SARIF response cannot exhaust the log budget or vice versa. Like logs, SARIF bodies bypass the on-disk cache and are never persisted beyond the fields above.
+
+These fields appear in JSON, NDJSON and language CSV. The terminal table condenses them into a single per-repository `SARIF N/M collected` note in `--detailed` mode, alongside any mismatch or SARIF-error languages.
+
 ## Permissions and limitations
 
 | Capability | Read permission |
 | --- | --- |
 | Repository inventory | Repository Metadata and Pull requests |
-| Default setup, analyses, databases | Repository Code scanning alerts |
+| Default setup, analyses, databases, SARIF | Repository Code scanning alerts |
 | Runs, jobs, logs | Repository Actions |
 | Security configurations and attachment | Organization Administration |
 | Custom properties | Organization Custom properties |

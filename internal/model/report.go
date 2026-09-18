@@ -259,6 +259,12 @@ type Stats struct {
 	RateLimitWaits   int     `json:"rate_limit_waits"`
 	DurationSeconds  float64 `json:"duration_seconds"`
 	RateLimitRemains int     `json:"rate_limit_remaining,omitempty"`
+	// LogBytesDownloaded is the total compressed Actions log bytes downloaded
+	// at diagnostics depth. Zero means log inspection was not enabled.
+	LogBytesDownloaded int64 `json:"log_bytes_downloaded,omitempty"`
+	// SARIFBytesDownloaded is the total SARIF bytes downloaded at diagnostics
+	// depth. Zero means SARIF collection was not enabled.
+	SARIFBytesDownloaded int64 `json:"sarif_bytes_downloaded,omitempty"`
 	// Incomplete is true when any organization or repository failed, meaning
 	// absence of a problem in this report does not prove absence of a problem.
 	Incomplete bool `json:"incomplete"`

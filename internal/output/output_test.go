@@ -332,6 +332,93 @@ func TestWriteLanguageCSVEmitsOneRowPerLanguage(t *testing.T) {
 	}
 }
 
+// language-csv is the one export that carries full per-language detail, so
+// every SARIF-derived field must get its own real column, populated for a
+// language that was collected and left blank for one that was never
+// attempted, rather than reading as a failed download.
+func TestWriteLanguageCSVIncludesSARIFColumns(t *testing.T) {
+	report := sampleReport()
+	rule := 5
+	artifacts := 12
+	report.Repositories[0].Languages = []model.LanguageState{
+		{
+			Language: model.LangJavaKotlin, Detected: true, Configured: true, Analyzed: true, Succeeded: true,
+			JobConclusion: "success", SARIFCollected: true, SARIFLanguage: model.LangJavaKotlin,
+			CodeQLVersion: "2.20.3", QueryPacks: []string{"codeql/java-queries@1.2.3"},
+			RuleCount: &rule, ResultsByLevel: map[string]int{"error": 1, "warning": 2}, ArtifactCount: &artifacts,
+		},
+		{Language: model.LangPython, Detected: true, Configured: true, JobConclusion: "failure"},
+	}
+
+	var buffer bytes.Buffer
+	if err := WriteLanguageCSV(&buffer, report, nil); err != nil {
+		t.Fatalf("WriteLanguageCSV returned an error: %v", err)
+	}
+	records, err := csv.NewReader(&buffer).ReadAll()
+	if err != nil {
+		t.Fatalf("emitted CSV is not parseable: %v", err)
+	}
+	index := map[string]int{}
+	for position, name := range records[0] {
+		index[name] = position
+	}
+	for _, column := range []string{
+		"SARIF collected", "SARIF error", "SARIF language", "SARIF language mismatch",
+		"CodeQL version", "Query packs", "Rule count", "Results by level", "Artifact count",
+	} {
+		if _, ok := index[column]; !ok {
+			t.Fatalf("missing expected column %q, header %v", column, records[0])
+		}
+	}
+
+	var javaRow, pythonRow []string
+	for _, row := range records[1:] {
+		switch row[index["Language"]] {
+		case string(model.LangJavaKotlin):
+			javaRow = row
+		case string(model.LangPython):
+			pythonRow = row
+		}
+	}
+	if javaRow == nil || pythonRow == nil {
+		t.Fatalf("expected rows for both languages, got %v", records)
+	}
+
+	if javaRow[index["SARIF collected"]] != "true" {
+		t.Errorf("java SARIF collected = %q, want true", javaRow[index["SARIF collected"]])
+	}
+	if javaRow[index["SARIF language mismatch"]] != "false" {
+		t.Errorf("java SARIF language mismatch = %q, want false", javaRow[index["SARIF language mismatch"]])
+	}
+	if javaRow[index["CodeQL version"]] != "2.20.3" {
+		t.Errorf("java CodeQL version = %q, want 2.20.3", javaRow[index["CodeQL version"]])
+	}
+	if javaRow[index["Query packs"]] != "codeql/java-queries@1.2.3" {
+		t.Errorf("java query packs = %q", javaRow[index["Query packs"]])
+	}
+	if javaRow[index["Rule count"]] != "5" {
+		t.Errorf("java rule count = %q, want 5", javaRow[index["Rule count"]])
+	}
+	if javaRow[index["Results by level"]] != "error=1; warning=2" {
+		t.Errorf("java results by level = %q", javaRow[index["Results by level"]])
+	}
+	if javaRow[index["Artifact count"]] != "12" {
+		t.Errorf("java artifact count = %q, want 12", javaRow[index["Artifact count"]])
+	}
+
+	// python never had SARIF attempted (no SarifFetcher, or a shallower
+	// depth): every SARIF column must be blank, not "false", so it cannot be
+	// misread as a definite failure.
+	for _, column := range []string{
+		"SARIF collected", "SARIF error", "SARIF language", "SARIF language mismatch",
+		"CodeQL version", "Query packs", "Rule count", "Results by level", "Artifact count",
+	} {
+		if got := pythonRow[index[column]]; got != "" {
+			t.Errorf("python %s = %q, want blank when SARIF was never attempted", column, got)
+		}
+	}
+}
+
 func TestWriteTableHighlightsProblems(t *testing.T) {
 	var buffer bytes.Buffer
 	err := WriteTable(&buffer, sampleReport(), TableOptions{

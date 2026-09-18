@@ -235,6 +235,34 @@ func (s *Store) Dir() string {
 	return s.dir
 }
 
+// Size reports the on-disk size and entry count of the cache directory, so a
+// scan can tell an operator how much space its metadata cache is using and
+// let them decide whether to clear it with --refresh.
+func (s *Store) Size() (bytes int64, entries int, err error) {
+	if s == nil || s.disable {
+		return 0, 0, nil
+	}
+	items, err := os.ReadDir(s.dir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return 0, 0, nil
+		}
+		return 0, 0, err
+	}
+	for _, item := range items {
+		if !isCacheEntry(item) {
+			continue
+		}
+		info, err := item.Info()
+		if err != nil {
+			continue
+		}
+		bytes += info.Size()
+		entries++
+	}
+	return bytes, entries, nil
+}
+
 func (s *Store) expired(cached entry) bool {
 	if s.maxAge <= 0 {
 		return false

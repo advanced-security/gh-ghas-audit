@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/signal"
 	"path"
@@ -24,6 +25,7 @@ import (
 	"github.com/advanced-security/gh-ghas-audit/v2/internal/ghapi"
 	"github.com/advanced-security/gh-ghas-audit/v2/internal/model"
 	"github.com/advanced-security/gh-ghas-audit/v2/internal/output"
+	"github.com/advanced-security/gh-ghas-audit/v2/internal/sarif"
 )
 
 // ExitCodeFailOn is returned when --fail-on matches, so scheduled workflows
@@ -63,6 +65,8 @@ type codeScanningOptions struct {
 	deepDiagnostics  string
 	deepMaxRepos     int
 	deepMaxMegabytes int
+	noSarif          bool
+	deepMaxSarifMB   int
 	detailed         bool
 	quiet            bool
 }
@@ -148,9 +152,13 @@ Examples:
 		"Deprecated, use --scan-depth diagnostics with --deep-scope")
 	_ = flags.MarkDeprecated("deep-diagnostics", "use --scan-depth diagnostics with --deep-scope")
 	flags.IntVar(&opts.deepMaxRepos, "deep-diagnostics-max-repos", 200,
-		"Maximum repositories to inspect at diagnostics depth")
+		"Maximum repositories to inspect at diagnostics depth; 0 means unlimited")
 	flags.IntVar(&opts.deepMaxMegabytes, "deep-diagnostics-max-mb", 32,
-		"Total compressed log download budget in MiB")
+		"Total compressed log download budget in MiB; 0 means unlimited")
+	flags.BoolVar(&opts.noSarif, "no-sarif", false,
+		"Disable SARIF download at diagnostics depth; log inspection is unaffected")
+	flags.IntVar(&opts.deepMaxSarifMB, "deep-diagnostics-max-sarif-mb", 1024,
+		"Total SARIF download budget in MiB, independent of --deep-diagnostics-max-mb; 0 means unlimited")
 
 	flags.BoolVar(&opts.detailed, "detailed", false,
 		"Add a detail column explaining why each repository has its status")
@@ -239,11 +247,15 @@ func (opts *codeScanningOptions) run(cmd *cobra.Command, _ []string) error {
 	if opts.concurrency < 1 {
 		return errors.New("--concurrency must be at least 1")
 	}
-	if opts.deepMaxRepos < 1 || opts.deepMaxMegabytes < 1 {
-		return errors.New("--deep-diagnostics-max-repos and --deep-diagnostics-max-mb must be at least 1")
+	if opts.deepMaxRepos < 0 || opts.deepMaxMegabytes < 0 || opts.deepMaxSarifMB < 0 {
+		return errors.New("--deep-diagnostics-max-repos, --deep-diagnostics-max-mb and " +
+			"--deep-diagnostics-max-sarif-mb cannot be negative; use 0 for unlimited")
 	}
 	if int64(opts.deepMaxMegabytes) > (1<<63-1)>>20 {
 		return errors.New("--deep-diagnostics-max-mb is too large")
+	}
+	if int64(opts.deepMaxSarifMB) > (1<<63-1)>>20 {
+		return errors.New("--deep-diagnostics-max-sarif-mb is too large")
 	}
 
 	store, err := opts.buildCache(cmd.ErrOrStderr())
@@ -298,10 +310,31 @@ func (opts *codeScanningOptions) run(cmd *cobra.Command, _ []string) error {
 	if deepMode != collector.DeepDiagnosticsOff {
 		progress("Deep diagnostics enabled: Actions logs will be downloaded and parsed. " +
 			"This is best effort, considerably slower, and consumes significant rate limit budget.")
-		options.LogFetcher = diagnostics.NewFetcher(client, diagnostics.Limits{
-			MaxRepositories: opts.deepMaxRepos,
-			MaxBytes:        int64(opts.deepMaxMegabytes) << 20,
+		logFetcher := diagnostics.NewFetcher(client, diagnostics.Limits{
+			MaxRepositories: unlimitedInt(opts.deepMaxRepos),
+			MaxBytes:        unlimitedBytes(opts.deepMaxMegabytes),
 		})
+		options.LogFetcher = logFetcher
+
+		var sarifFetcher *sarif.Fetcher
+		if !opts.noSarif {
+			progress("SARIF download enabled: default-branch analyses will be downloaded to " +
+				"cross-check languages, query packs and result counts.")
+			sarifFetcher = sarif.NewFetcher(client, sarif.Limits{
+				MaxRepositories: unlimitedInt(opts.deepMaxRepos),
+				MaxBytes:        unlimitedBytes(opts.deepMaxSarifMB),
+			})
+			options.SarifFetcher = sarifFetcher
+		}
+
+		var repoCount int
+		options.OnRepository = func(model.Repo) {
+			repoCount++
+			if repoCount%25 != 0 {
+				return
+			}
+			progress(diagnosticsProgress(repoCount, opts, logFetcher, sarifFetcher))
+		}
 	}
 
 	report, err := collector.New(client, options).Collect(ctx, version())
@@ -318,6 +351,10 @@ func (opts *codeScanningOptions) run(cmd *cobra.Command, _ []string) error {
 
 	if err := store.Save(); err != nil {
 		progress(fmt.Sprintf("warning: cache could not be saved: %v", err))
+	}
+
+	if deepMode != collector.DeepDiagnosticsOff {
+		progress(diagnosticsSummary(report, store))
 	}
 
 	// --fail-on is a compliance gate on what was collected, not on what is
@@ -776,6 +813,66 @@ func resolveDepth(depthValue, scopeValue, legacyValue string, depthExplicit bool
 		scope = collector.DeepDiagnosticsAll
 	}
 	return depth, scope, nil
+}
+
+// unlimitedInt translates a user-supplied "0 means unlimited" flag value into
+// a sentinel large enough that a fetcher's repository counter will never
+// reach it, without touching the fetcher's own "<=0 defaults" semantics.
+func unlimitedInt(n int) int {
+	if n == 0 {
+		return math.MaxInt32
+	}
+	return n
+}
+
+// unlimitedBytes translates a user-supplied megabyte budget into bytes, with
+// 0 meaning truly unlimited (a sentinel large enough it is never reached).
+func unlimitedBytes(megabytes int) int64 {
+	if megabytes == 0 {
+		return math.MaxInt64
+	}
+	return int64(megabytes) << 20
+}
+
+// diagnosticsProgress renders a periodic status line while deep diagnostics
+// is downloading logs and/or SARIF, so long-running scans aren't silent.
+func diagnosticsProgress(repoCount int, opts *codeScanningOptions, logFetcher *diagnostics.Fetcher, sarifFetcher *sarif.Fetcher) string {
+	parts := []string{fmt.Sprintf("diagnostics: %d repositories processed", repoCount)}
+	if logFetcher != nil {
+		parts = append(parts, fmt.Sprintf("logs %s", formatBudget(logFetcher.BytesDownloaded(), opts.deepMaxMegabytes)))
+	}
+	if sarifFetcher != nil {
+		parts = append(parts, fmt.Sprintf("SARIF %s", formatBudget(sarifFetcher.BytesDownloaded(), opts.deepMaxSarifMB)))
+	}
+	return strings.Join(parts, ", ")
+}
+
+// diagnosticsSummary renders the end-of-run byte totals and on-disk cache
+// size, so an operator can decide whether to --refresh and reclaim space.
+func diagnosticsSummary(report *model.Report, store *cache.Store) string {
+	parts := []string{
+		fmt.Sprintf("diagnostics downloaded: logs %s, SARIF %s",
+			formatMB(report.Stats.LogBytesDownloaded), formatMB(report.Stats.SARIFBytesDownloaded)),
+	}
+	if size, count, err := store.Size(); err == nil && store.Dir() != "" {
+		parts = append(parts, fmt.Sprintf("cache: %s across %d entries at %s (use --refresh to clear)",
+			formatMB(size), count, store.Dir()))
+	}
+	return strings.Join(parts, "; ")
+}
+
+// formatBudget renders bytes downloaded against a configured megabyte
+// budget, or notes the budget is unlimited when the flag value is 0.
+func formatBudget(downloaded int64, limitMB int) string {
+	mb := float64(downloaded) / (1 << 20)
+	if limitMB == 0 {
+		return fmt.Sprintf("%.1f MiB downloaded (unlimited)", mb)
+	}
+	return fmt.Sprintf("%.1f/%d MiB", mb, limitMB)
+}
+
+func formatMB(bytes int64) string {
+	return fmt.Sprintf("%.1f MiB", float64(bytes)/(1<<20))
 }
 
 func splitList(value string) []string {

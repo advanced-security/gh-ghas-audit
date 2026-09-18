@@ -281,6 +281,10 @@ func NewFetcher(client logClient, limits Limits) *Fetcher {
 	return &Fetcher{client: client, limits: limits, downloadSlot: make(chan struct{}, 1)}
 }
 
+// BytesDownloaded reports the total compressed log bytes downloaded so far,
+// for end-of-run reporting.
+func (f *Fetcher) BytesDownloaded() int64 { return f.bytesRead.Load() }
+
 // Budget reports whether the fetcher has exhausted its limits, and a message
 // explaining which limit was reached.
 func (f *Fetcher) Budget() (bool, string) {

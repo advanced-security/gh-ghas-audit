@@ -14,6 +14,7 @@ import (
 
 	"github.com/advanced-security/gh-ghas-audit/v2/internal/ghapi"
 	"github.com/advanced-security/gh-ghas-audit/v2/internal/model"
+	"github.com/advanced-security/gh-ghas-audit/v2/internal/sarif"
 )
 
 var (
@@ -67,6 +68,13 @@ const (
 // best-effort log parsing.
 type LogFetcher interface {
 	Inspect(ctx context.Context, org, repo string, runID int64) ([]model.Diagnostic, error)
+}
+
+// SarifFetcher retrieves and interprets SARIF for a repository's per-language
+// analyses. It is satisfied by internal/sarif and injected so the collector
+// has no hard dependency on SARIF parsing.
+type SarifFetcher interface {
+	Inspect(ctx context.Context, org, repo string, analyses []sarif.Analysis) (map[model.Language]*sarif.Result, error)
 }
 
 // Client is the subset of the GitHub API surface the collector depends on.
@@ -123,6 +131,11 @@ type Options struct {
 	Depth           Depth
 	DeepDiagnostics DeepDiagnosticsMode
 	LogFetcher      LogFetcher
+	// SarifFetcher downloads and parses SARIF for each language analysis when
+	// non-nil. It shares DeepDiagnostics scope selection with LogFetcher but
+	// is independently enabled, so SARIF collection can be disabled with
+	// --no-sarif while log inspection continues.
+	SarifFetcher SarifFetcher
 
 	// Progress receives human-readable progress messages.
 	Progress func(message string)
@@ -260,8 +273,21 @@ func (c *Collector) Collect(ctx context.Context, toolVersion string) (*model.Rep
 		RateLimitRemains: stats.RateLimitRemaining(),
 		Incomplete:       len(report.Warnings) > 0 || anyRepoErrors(repositories),
 	}
+	if downloader, ok := c.options.LogFetcher.(byteBudgetReporter); ok {
+		report.Stats.LogBytesDownloaded = downloader.BytesDownloaded()
+	}
+	if downloader, ok := c.options.SarifFetcher.(byteBudgetReporter); ok {
+		report.Stats.SARIFBytesDownloaded = downloader.BytesDownloaded()
+	}
 
 	return report, nil
+}
+
+// byteBudgetReporter is satisfied by fetchers that track a download budget
+// (diagnostics.Fetcher, sarif.Fetcher), letting the collector surface total
+// bytes downloaded without depending on their concrete types.
+type byteBudgetReporter interface {
+	BytesDownloaded() int64
 }
 
 func anyRepoErrors(repositories []model.Repo) bool {
@@ -451,6 +477,7 @@ func (c *Collector) scanRepositories(
 
 				repo := c.collectRepository(ctx, org, source, extra)
 				c.applyDeepDiagnostics(ctx, &repo)
+				c.applySarifDiagnostics(ctx, &repo)
 
 				// Each worker owns a distinct index, so the shared slices are
 				// written without contention.
@@ -531,6 +558,77 @@ func (c *Collector) applyDeepDiagnostics(ctx context.Context, repo *model.Repo) 
 	// A log-derived warning can promote an otherwise healthy repository to
 	// degraded, which is the "green run, low quality scan" case.
 	finalizeStatus(repo, hasWarningDiagnostic(repo.Diagnostics))
+}
+
+// applySarifDiagnostics optionally augments a repository's per-language state
+// with structural evidence extracted from each language's SARIF: query packs,
+// rule counts, results by severity, artifact counts and a SARIF-vs-category
+// language cross-check. It shares deep-scope selection with
+// applyDeepDiagnostics but is independently enabled, so it does nothing when
+// SarifFetcher is nil (--no-sarif or a depth below diagnostics).
+func (c *Collector) applySarifDiagnostics(ctx context.Context, repo *model.Repo) {
+	if c.options.SarifFetcher == nil || c.options.DeepDiagnostics == DeepDiagnosticsOff {
+		return
+	}
+	if c.options.DeepDiagnostics == DeepDiagnosticsProblematic && !model.NeedsAttention(repo.Status.Overall) {
+		return
+	}
+
+	var analyses []sarif.Analysis
+	for _, state := range repo.Languages {
+		if state.AnalysisID != 0 {
+			analyses = append(analyses, sarif.Analysis{Language: state.Language, AnalysisID: state.AnalysisID})
+		}
+	}
+	if len(analyses) == 0 {
+		return
+	}
+
+	results, err := c.options.SarifFetcher.Inspect(ctx, repo.Organization, repo.Name, analyses)
+	if ctx.Err() != nil {
+		return
+	}
+
+	for index := range repo.Languages {
+		state := &repo.Languages[index]
+		if result, ok := results[state.Language]; ok {
+			applySarifResult(state, result)
+		}
+	}
+
+	if err != nil {
+		// The failure may have been partial (some languages succeeded before
+		// the budget ran out), so the repository is reclassified as
+		// incomplete rather than left with its earlier verdict, but any
+		// results already collected above are kept.
+		message := fmt.Sprintf("sarif: %v", err)
+		repo.Errors = append(repo.Errors, message)
+		for index := range repo.Languages {
+			state := &repo.Languages[index]
+			if state.AnalysisID != 0 && !state.SARIFCollected {
+				state.SARIFError = message
+			}
+		}
+		finalizeStatus(repo, hasWarningDiagnostic(repo.Diagnostics))
+	}
+}
+
+// applySarifResult copies structural SARIF evidence onto a language's state.
+// Only structural fields are copied: result messages, locations and source
+// snippets are never read by internal/sarif in the first place.
+func applySarifResult(state *model.LanguageState, result *sarif.Result) {
+	state.SARIFCollected = true
+	state.CodeQLVersion = result.CodeQLVersion
+	state.QueryPacks = result.QueryPacks
+	ruleCount := result.RuleCount
+	state.RuleCount = &ruleCount
+	state.ResultsByLevel = result.ResultsByLevel
+	artifactCount := result.ArtifactCount
+	state.ArtifactCount = &artifactCount
+	if result.Language != "" {
+		state.SARIFLanguage = result.Language
+		state.SARIFLanguageMismatch = state.Language != "" && result.Language != state.Language
+	}
 }
 
 // skipRepository applies filters that can be evaluated before any per-

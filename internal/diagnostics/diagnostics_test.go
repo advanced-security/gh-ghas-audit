@@ -35,7 +35,7 @@ func buildArchive(t *testing.T, files map[string]string) []byte {
 
 func scanArchive(t *testing.T, files map[string]string) []model.Diagnostic {
 	t.Helper()
-	found, err := Scan(buildArchive(t, files), "https://github.com/acme/app/actions/runs/1", 300)
+	found, _, err := Scan(buildArchive(t, files), "https://github.com/acme/app/actions/runs/1", 300)
 	if err != nil {
 		t.Fatalf("Scan returned an error: %v", err)
 	}
@@ -68,6 +68,59 @@ func TestHealthyRunProducesNoDiagnostics(t *testing.T) {
 
 	if len(found) != 0 {
 		t.Fatalf("a healthy run must produce no diagnostics, got %+v", found)
+	}
+}
+
+// TestScanExtractsCodeQLVersionFromToolcachePath verifies the CLI version is
+// recovered from the toolcache path CodeQL logs during setup, and attributed
+// to the language of the log file it was found in.
+func TestScanExtractsCodeQLVersionFromToolcachePath(t *testing.T) {
+	found, versions, err := Scan(buildArchive(t, map[string]string{
+		"1_Analyze (java-kotlin).txt": realHealthyLog,
+	}), "https://github.com/acme/app/actions/runs/1", 300)
+	if err != nil {
+		t.Fatalf("Scan returned an error: %v", err)
+	}
+	if len(found) != 0 {
+		t.Fatalf("a healthy run must produce no diagnostics, got %+v", found)
+	}
+	if got := versions[model.LangJavaKotlin]; got != "2.26.4" {
+		t.Fatalf("versions[java-kotlin] = %q, want 2.26.4 (versions=%v)", got, versions)
+	}
+}
+
+// TestScanCodeQLVersionKeepsLastMatch verifies that when a job log shows an
+// old cached CodeQL version being deleted and a newer one installed
+// afterwards, the version reported is the one actually used for analysis
+// (the last occurrence), not the first.
+func TestScanCodeQLVersionKeepsLastMatch(t *testing.T) {
+	log := "" +
+		"2026-09-05T14:34:17Z Finished downloading and extracting CodeQL bundle to /opt/hostedtoolcache/CodeQL/2.26.4/x64.\n" +
+		"2026-09-05T14:34:18Z Deleted the CodeQL tools at '/opt/hostedtoolcache/CodeQL/2.26.4' because they were superseded.\n" +
+		"2026-09-05T14:34:19Z Finished downloading and extracting CodeQL bundle to /opt/hostedtoolcache/CodeQL/2.27.0/x64.\n"
+
+	_, versions, err := Scan(buildArchive(t, map[string]string{"0_Analyze (go).txt": log}),
+		"https://github.com/acme/app/actions/runs/1", 300)
+	if err != nil {
+		t.Fatalf("Scan returned an error: %v", err)
+	}
+	if got := versions[model.LangGo]; got != "2.27.0" {
+		t.Fatalf("versions[go] = %q, want the later version 2.27.0 (versions=%v)", got, versions)
+	}
+}
+
+// TestScanCodeQLVersionAbsentWithoutEvidence verifies that a log file with no
+// toolcache path evidence produces no version entry, rather than a false
+// empty-string match.
+func TestScanCodeQLVersionAbsentWithoutEvidence(t *testing.T) {
+	_, versions, err := Scan(buildArchive(t, map[string]string{
+		"0_Analyze (go).txt": "2026-09-05T14:34:17Z Analysis complete.\n",
+	}), "https://github.com/acme/app/actions/runs/1", 300)
+	if err != nil {
+		t.Fatalf("Scan returned an error: %v", err)
+	}
+	if _, ok := versions[model.LangGo]; ok {
+		t.Fatalf("expected no version entry without toolcache evidence, got %v", versions)
 	}
 }
 
@@ -434,7 +487,7 @@ func TestExcerptsAreTruncated(t *testing.T) {
 	long := "2026-09-05T14:34:17Z ##[warning]autobuild failed " +
 		string(bytes.Repeat([]byte("x"), 500)) + "\n"
 
-	found, err := Scan(buildArchive(t, map[string]string{"0_Analyze (go).txt": long}),
+	found, _, err := Scan(buildArchive(t, map[string]string{"0_Analyze (go).txt": long}),
 		"https://github.com/acme/app/actions/runs/1", 50)
 	if err != nil {
 		t.Fatalf("Scan returned an error: %v", err)
@@ -453,7 +506,7 @@ func TestFindingsAreCappedPerRun(t *testing.T) {
 		builder.WriteString(fmt.Sprintf("2026-09-05T14:34:17Z ##[warning]Unfamiliar problem number %d\n", index))
 	}
 
-	found, err := Scan(buildArchive(t, map[string]string{"0_Analyze (go).txt": builder.String()}),
+	found, _, err := Scan(buildArchive(t, map[string]string{"0_Analyze (go).txt": builder.String()}),
 		"https://github.com/acme/app/actions/runs/1", 300)
 	if !errors.Is(err, ErrDiagnosticsTruncated) {
 		t.Fatalf("cap must make the inspection explicitly incomplete: %v", err)
@@ -473,7 +526,7 @@ func TestWarningAfterInformationalCapIsRetained(t *testing.T) {
 	}
 	builder.WriteString("##[group]Low Go analysis quality (1 result)\n* warning after suggestions\n##[endgroup]\n")
 
-	found, err := Scan(buildArchive(t, map[string]string{"0_Analyze (go).txt": builder.String()}),
+	found, _, err := Scan(buildArchive(t, map[string]string{"0_Analyze (go).txt": builder.String()}),
 		"https://github.com/acme/app/actions/runs/1", 300)
 	if !errors.Is(err, ErrDiagnosticsTruncated) {
 		t.Fatalf("cap must make the inspection explicitly incomplete: %v", err)
@@ -487,10 +540,10 @@ func TestWarningAfterInformationalCapIsRetained(t *testing.T) {
 }
 
 func TestScanHandlesEmptyAndInvalidArchives(t *testing.T) {
-	if found, err := Scan(nil, "url", 200); err != nil || len(found) != 0 {
+	if found, _, err := Scan(nil, "url", 200); err != nil || len(found) != 0 {
 		t.Errorf("an empty archive must be ignored, got %v, %v", found, err)
 	}
-	if _, err := Scan([]byte("not a zip file"), "url", 200); err == nil {
+	if _, _, err := Scan([]byte("not a zip file"), "url", 200); err == nil {
 		t.Error("a corrupt archive must be reported rather than silently ignored")
 	}
 }

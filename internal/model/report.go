@@ -188,6 +188,21 @@ type Repo struct {
 	// Errors records per-repository collection failures. A repository with
 	// errors has incomplete data and must not be read as healthy.
 	Errors []string `json:"errors,omitempty"`
+
+	// PendingSARIFAnalyses carries default-branch CodeQL analyses whose
+	// category did not match the "language:<name>" convention used to build
+	// Languages, kept only long enough for a SARIF-based language
+	// cross-check to run for custom or API-based uploads. It is scratch
+	// state for a single collection pass, consumed and cleared before the
+	// report is returned, and is never serialized.
+	PendingSARIFAnalyses []PendingSARIFAnalysis `json:"-"`
+}
+
+// PendingSARIFAnalysis identifies one analysis kept aside because its
+// category could not be mapped to a language by name alone.
+type PendingSARIFAnalysis struct {
+	AnalysisID int64
+	Category   string
 }
 
 // ConfigDetail captures how code scanning is set up for a repository.
@@ -259,6 +274,12 @@ type Stats struct {
 	RateLimitWaits   int     `json:"rate_limit_waits"`
 	DurationSeconds  float64 `json:"duration_seconds"`
 	RateLimitRemains int     `json:"rate_limit_remaining,omitempty"`
+	// LogBytesDownloaded is the total compressed Actions log bytes downloaded
+	// at diagnostics depth. Zero means log inspection was not enabled.
+	LogBytesDownloaded int64 `json:"log_bytes_downloaded,omitempty"`
+	// SARIFBytesDownloaded is the total SARIF bytes downloaded at diagnostics
+	// depth. Zero means SARIF collection was not enabled.
+	SARIFBytesDownloaded int64 `json:"sarif_bytes_downloaded,omitempty"`
 	// Incomplete is true when any organization or repository failed, meaning
 	// absence of a problem in this report does not prove absence of a problem.
 	Incomplete bool `json:"incomplete"`

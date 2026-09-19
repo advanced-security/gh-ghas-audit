@@ -140,7 +140,7 @@ gh ghas-audit code-scanning -o my-org --fail-on failing,stalled
 
 JSON is the canonical report. `schema_version` versions the data contract independently of the CLI release; `settings.scan_depth` records the evidence tier. NDJSON emits a report header followed by repository records after collection completes.
 
-Repository CSV includes the four dimensions, language lists, run links, configuration, diagnostics, reasons and errors. Language CSV includes per-language analysis evidence and errors. Both include `Evidence complete`; custom properties add `Property: NAME` columns.
+Repository CSV includes the four dimensions, language lists, run links, configuration, diagnostics, reasons and errors, plus (at diagnostics depth) a `CodeQL version` and (unless `--no-sarif`) a `Query packs` column aggregated across the repository's languages; `CodeQL version` prefers SARIF but falls back to the log-derived version for a language SARIF could not cover. Language CSV includes per-language analysis evidence, errors, and (at diagnostics depth) a `Log CodeQL version` column plus (unless `--no-sarif`) SARIF-derived query pack, rule count, results-by-level, artifact count and language cross-check fields. Both include `Evidence complete`; custom properties add `Property: NAME` columns.
 
 Each language records `runtime_evaluation`: `not-evaluated`, `evaluated` or `incomplete`. Uncollected `analyzed`/`succeeded` values are null in JSON/NDJSON and blank in language CSV.
 
@@ -161,8 +161,28 @@ Each language records `runtime_evaluation`: `not-evaluated`, `evaluated` or `inc
 | `--cache-max-age` | Unset | Ignore cache entries older than a duration |
 | `--refresh` | Off | Clear the cache before collection |
 | `--no-cache` | Off | Disable caching |
-| `--deep-diagnostics-max-repos` | `200` | Maximum repositories inspected for logs |
-| `--deep-diagnostics-max-mb` | `32` | Total compressed log download budget in MiB |
+| `--deep-diagnostics-max-repos` | `200` | Maximum repositories inspected for logs and SARIF at diagnostics depth; `0` means unlimited |
+| `--deep-diagnostics-max-mb` | `32` | Total compressed log download budget in MiB; `0` means unlimited |
+| `--no-sarif` | Off | Disable SARIF download at diagnostics depth; log inspection is unaffected |
+| `--deep-diagnostics-max-sarif-mb` | `1024` | Total SARIF download budget in MiB, independent of `--deep-diagnostics-max-mb`; `0` means unlimited |
+
+### No-limits mode (compliance/exhaustive audits)
+
+For a compliance audit where completeness must not be capped by a default budget, run diagnostics depth against every repository with every ceiling set to `0` (unlimited):
+
+```sh
+gh ghas-audit code-scanning -o my-org --scan-depth diagnostics --deep-scope all \
+  --deep-diagnostics-max-repos 0 --deep-diagnostics-max-mb 0 --deep-diagnostics-max-sarif-mb 0
+```
+
+This is the deepest evidence tier the tool can produce: `--deep-scope all` inspects every repository, not just those already flagged as needing attention, and the three `0` budgets remove the repository-count, log-byte and SARIF-byte ceilings that would otherwise stop collection early on a large organization. Use this as the reference command for a full compliance sweep; the defaults above exist specifically to keep an accidental unbounded run from happening.
+
+⚠️ **Before running unlimited on a large organization:**
+
+- **Rate limit.** Every repository at diagnostics depth downloads a full Actions log archive and one SARIF file per language analysis, on top of the REST calls health depth already makes. An organization of hundreds of repositories can exhaust a 5,000/hour REST quota in one run; watch `stats.rate_limit_waits` (throttling already honors `Retry-After` and reset headers) and consider a lower `--concurrency` if secondary limits start triggering.
+- **Disk and memory.** Log and SARIF downloads are never persisted to the on-disk cache (only their parsed findings are), but they are held in memory for the duration of each repository's inspection, and a single repository's combined archives can run into hundreds of MiB with real `0` limits. The metadata cache (ETags, response bodies for everything *other* than logs/SARIF) still grows with `--cache-dir`; for a very large organization, confirm the cache volume has room, or pair unlimited mode with `--no-cache` to avoid growing it further.
+- **Runtime.** Log downloads are serialized to share one byte budget, so this mode is considerably slower than health depth; expect a full-organization run to take minutes to hours rather than seconds, depending on repository count and log/SARIF sizes.
+- **Start narrow first.** Validate the command against `--match` or a small `--activity active` slice, or with `--deep-scope problematic`, before removing every limit across an entire organization.
 
 Inventory uses one GraphQL query per 50 repositories. Runtime evidence requires per-repository REST calls; repositories with more than 100 CodeQL analysis records require additional paginated requests. ETag revalidation saves primary quota but still makes network requests. Large organizations are batch workloads: use scope filters, caching and suitable API quotas.
 
@@ -177,12 +197,28 @@ Log downloads are serialized to enforce the shared byte budget; other collection
 
 Log findings carry `"source": "log"`. For example, low C# analysis quality or duplicate Java classes can make a successful workflow `degraded`; build-mode `none` suggestions do not.
 
+### SARIF cross-check
+
+At diagnostics depth, each default-branch language analysis's SARIF representation (`GET .../code-scanning/analyses/{id}` with `Accept: application/sarif+json`, the same endpoint and permission already used for its metadata) is also downloaded unless `--no-sarif` is set. This adds, per language:
+
+- `codeql_version`, `query_packs` and `rule_count`, read from the SARIF tool driver and its extensions.
+- `results_by_level`, a count of results by SARIF severity level.
+- `artifact_count`, the number of source artifacts SARIF recorded.
+- `sarif_language`, the language CodeQL actually scanned, inferred from query pack names and rule ID prefixes, independent of the analysis category string. This matters for custom or API-based CodeQL uploads, which are not guaranteed to use the same category names a default or advanced-setup workflow would.
+- `sarif_language_mismatch`, set when `sarif_language` disagrees with the analysis's own category-derived language. This is informational: a mismatch alone does not change a repository's overall status.
+
+Deep diagnostics (Actions log parsing) also recovers `log_codeql_version`, the CodeQL CLI version read from the job log's toolcache path (for example `.../hostedtoolcache/CodeQL/2.27.0/x64`). It is independent of SARIF and of `--no-sarif`: it comes from `--scan-depth diagnostics` log inspection, so it remains available for a language whose SARIF fetch was skipped or failed, such as one with a known analysis error. When a log shows an old CodeQL version deleted mid-run and a newer one installed afterwards, the later version is kept as the one actually used for analysis. Query pack names are not recovered from logs: real-world log samples only ever mention the top-level requested pack, never its extension or dependency packs, so a log-derived pack list would be silently incomplete.
+
+Only structural SARIF fields are read. Result messages, locations and source snippets are never parsed or retained. SARIF downloads share the `--deep-scope` selection with log inspection but have their own repository and byte budgets (`--deep-diagnostics-max-sarif-mb`, defaulting to 1024 MiB), so a large SARIF response cannot exhaust the log budget or vice versa. Like logs, SARIF bodies bypass the on-disk cache and are never persisted beyond the fields above.
+
+These fields appear in JSON, NDJSON and language CSV (which also has a `Log CodeQL version` column). The terminal table and repository CSV also show a `CODEQL VERSION`/`CodeQL version` and `QUERY PACKS`/`Query packs` column, each aggregated across every language in the repository; the version column prefers SARIF's `codeql_version` but falls back to `log_codeql_version` for a language SARIF could not cover. Languages that share the same CodeQL version are grouped together; every entry is tagged `value[language, ...]` so multi-language repositories never leave it ambiguous which language a version or pack belongs to, for example `2.20.3[java-kotlin, csharp]; 2.19.1[python]`. The table's `--detailed` mode additionally shows a single per-repository `SARIF N/M collected` note, alongside any mismatch or SARIF-error languages.
+
 ## Permissions and limitations
 
 | Capability | Read permission |
 | --- | --- |
 | Repository inventory | Repository Metadata and Pull requests |
-| Default setup, analyses, databases | Repository Code scanning alerts |
+| Default setup, analyses, databases, SARIF | Repository Code scanning alerts |
 | Runs, jobs, logs | Repository Actions |
 | Security configurations and attachment | Organization Administration |
 | Custom properties | Organization Custom properties |

@@ -13,7 +13,7 @@ func TestOversizedLogLineIsNotCompleteEvidence(t *testing.T) {
 	archive := buildArchive(t, map[string]string{
 		"Analyze (go).txt": strings.Repeat("x", 128*1024) + "\n##[warning]Low Go analysis quality\n",
 	})
-	if _, err := Scan(archive, "", 300); err == nil || !strings.Contains(err.Error(), "token too long") {
+	if _, _, err := Scan(archive, "", 300); err == nil || !strings.Contains(err.Error(), "token too long") {
 		t.Fatalf("oversized line silently truncated the inspection: %v", err)
 	}
 }
@@ -46,7 +46,7 @@ func TestCorruptLogReadErrorIsPropagated(t *testing.T) {
 		t.Fatal(err)
 	}
 	archive[offset] = 'x'
-	if _, err := Scan(archive, "", 300); !errors.Is(err, zip.ErrChecksum) {
+	if _, _, err := Scan(archive, "", 300); !errors.Is(err, zip.ErrChecksum) {
 		t.Fatalf("corrupt entry was accepted as complete: %v", err)
 	}
 }
@@ -58,7 +58,7 @@ func TestUnsupportedLogEntryIsNotSilentlySkipped(t *testing.T) {
 		t.Fatal("central directory was not found")
 	}
 	binary.LittleEndian.PutUint16(archive[header+10:], 99)
-	if _, err := Scan(archive, "", 300); !errors.Is(err, zip.ErrAlgorithm) {
+	if _, _, err := Scan(archive, "", 300); !errors.Is(err, zip.ErrAlgorithm) {
 		t.Fatalf("unreadable entry was skipped without an error: %v", err)
 	}
 }

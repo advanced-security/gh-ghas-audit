@@ -152,6 +152,53 @@ type LanguageState struct {
 	// the language. Zero results on a language that should produce them is a
 	// weak signal on its own, so it is reported rather than judged.
 	ResultsCount *int `json:"results_count,omitempty"`
+
+	// AnalysisID is the most recent code scanning analysis ID for this
+	// language on the default branch. It is collector-internal plumbing used
+	// to fetch the analysis's SARIF representation and is never part of the
+	// serialized report.
+	AnalysisID int64 `json:"-"`
+
+	// SARIFCollected is true once the analysis's SARIF representation has
+	// been downloaded and parsed successfully. The remaining SARIF-derived
+	// fields are only meaningful when this is true.
+	SARIFCollected bool `json:"sarif_collected,omitempty"`
+	// SARIFError explains why SARIF collection was attempted but did not
+	// complete (for example a budget limit, a missing analysis or a denied
+	// permission). It is empty both when SARIF was never attempted and when
+	// it succeeded, so callers must check SARIFCollected to tell those apart.
+	SARIFError string `json:"sarif_error,omitempty"`
+	// SARIFLanguage is the language CodeQL actually scanned, inferred from
+	// the SARIF query pack names or, failing that, rule ID prefixes. Unlike
+	// Language, which comes from the caller-supplied analysis category, this
+	// is tamper-resistant: a custom or API-based upload cannot mislabel it by
+	// choosing an arbitrary category string.
+	SARIFLanguage Language `json:"sarif_language,omitempty"`
+	// SARIFLanguageMismatch is true when SARIFLanguage disagrees with
+	// Language, which flags a category that does not describe what was
+	// actually scanned.
+	SARIFLanguageMismatch bool `json:"sarif_language_mismatch,omitempty"`
+	// CodeQLVersion is the CodeQL CLI version recorded in the SARIF tool
+	// driver.
+	CodeQLVersion string `json:"codeql_version,omitempty"`
+	// LogCodeQLVersion is the CodeQL CLI version recovered from the Actions
+	// log's toolcache path (for example ".../hostedtoolcache/CodeQL/2.27.0/
+	// x64/..."). Unlike CodeQLVersion, it does not require SARIF and remains
+	// available even for a language whose analysis failed and therefore has
+	// no SARIF representation to read a version from - which is exactly the
+	// case an already-known AnalysisError causes SARIF collection to skip.
+	LogCodeQLVersion string `json:"log_codeql_version,omitempty"`
+	// QueryPacks lists the query packs the analysis used, as "name@version".
+	QueryPacks []string `json:"query_packs,omitempty"`
+	// RuleCount is the number of distinct rules (queries) available to the
+	// analysis, combining the tool driver and its extensions.
+	RuleCount *int `json:"rule_count,omitempty"`
+	// ResultsByLevel counts SARIF results by severity level (error, warning,
+	// note), giving a breakdown the analysis-level ResultsCount does not.
+	ResultsByLevel map[string]int `json:"results_by_level,omitempty"`
+	// ArtifactCount is the number of source artifacts SARIF recorded for the
+	// analysis.
+	ArtifactCount *int `json:"artifact_count,omitempty"`
 }
 
 // MarshalJSON preserves booleans internally while emitting null for runtime

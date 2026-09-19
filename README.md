@@ -166,6 +166,24 @@ Each language records `runtime_evaluation`: `not-evaluated`, `evaluated` or `inc
 | `--no-sarif` | Off | Disable SARIF download at diagnostics depth; log inspection is unaffected |
 | `--deep-diagnostics-max-sarif-mb` | `1024` | Total SARIF download budget in MiB, independent of `--deep-diagnostics-max-mb`; `0` means unlimited |
 
+### No-limits mode (compliance/exhaustive audits)
+
+For a compliance audit where completeness must not be capped by a default budget, run diagnostics depth against every repository with every ceiling set to `0` (unlimited):
+
+```sh
+gh ghas-audit code-scanning -o my-org --scan-depth diagnostics --deep-scope all \
+  --deep-diagnostics-max-repos 0 --deep-diagnostics-max-mb 0 --deep-diagnostics-max-sarif-mb 0
+```
+
+This is the deepest evidence tier the tool can produce: `--deep-scope all` inspects every repository, not just those already flagged as needing attention, and the three `0` budgets remove the repository-count, log-byte and SARIF-byte ceilings that would otherwise stop collection early on a large organization. Use this as the reference command for a full compliance sweep; the defaults above exist specifically to keep an accidental unbounded run from happening.
+
+⚠️ **Before running unlimited on a large organization:**
+
+- **Rate limit.** Every repository at diagnostics depth downloads a full Actions log archive and one SARIF file per language analysis, on top of the REST calls health depth already makes. An organization of hundreds of repositories can exhaust a 5,000/hour REST quota in one run; watch `stats.rate_limit_waits` (throttling already honors `Retry-After` and reset headers) and consider a lower `--concurrency` if secondary limits start triggering.
+- **Disk and memory.** Log and SARIF downloads are never persisted to the on-disk cache (only their parsed findings are), but they are held in memory for the duration of each repository's inspection, and a single repository's combined archives can run into hundreds of MiB with real `0` limits. The metadata cache (ETags, response bodies for everything *other* than logs/SARIF) still grows with `--cache-dir`; for a very large organization, confirm the cache volume has room, or pair unlimited mode with `--no-cache` to avoid growing it further.
+- **Runtime.** Log downloads are serialized to share one byte budget, so this mode is considerably slower than health depth; expect a full-organization run to take minutes to hours rather than seconds, depending on repository count and log/SARIF sizes.
+- **Start narrow first.** Validate the command against `--match` or a small `--activity active` slice, or with `--deep-scope problematic`, before removing every limit across an entire organization.
+
 Inventory uses one GraphQL query per 50 repositories. Runtime evidence requires per-repository REST calls; repositories with more than 100 CodeQL analysis records require additional paginated requests. ETag revalidation saves primary quota but still makes network requests. Large organizations are batch workloads: use scope filters, caching and suitable API quotas.
 
 REST throttling honours `Retry-After` and reset headers. Recorded waits appear in `stats.rate_limit_waits`. Increasing concurrency can trigger secondary limits.

@@ -148,6 +148,14 @@ func (c *Collector) collectRepository(ctx context.Context, org string, source ap
 					repo.Status.Freshness = model.FreshUnknown
 					repo.Status.Coverage = model.CoverageUnknown
 					repo.Languages = languages.Sorted()
+					// External CI's analyses never match the
+					// "language:<name>" category convention (there is no
+					// managed workflow to have written it), so every one of
+					// them is unmatched. Preserving them here, not just on
+					// the managed-workflow paths below, means a custom/API
+					// upload's SARIF is still fetched and cross-checked even
+					// though its execution health is not evaluated.
+					repo.PendingSARIFAnalyses = report.Unmatched
 					repo.Diagnostics = append(repo.Diagnostics, model.Diagnostic{
 						Source:   model.SourceAPI,
 						Severity: "info",

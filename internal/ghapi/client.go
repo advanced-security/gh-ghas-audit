@@ -32,6 +32,9 @@ const (
 	// primary rate limit reset, so a scan cannot hang indefinitely.
 	maxRateLimitWait = 15 * time.Minute
 	acceptJSON       = "application/vnd.github+json"
+	// acceptSARIF requests the SARIF representation of a code scanning
+	// analysis from the same endpoint that otherwise returns JSON metadata.
+	acceptSARIF      = "application/sarif+json"
 	apiVersionHeader = "X-GitHub-Api-Version"
 	apiVersion       = "2022-11-28"
 )
@@ -237,7 +240,7 @@ func (c *Client) resolveURL(pathOrURL string) string {
 // It uses stored ETags to issue conditional requests; a 304 response is served
 // from cache and does not count against the primary rate limit.
 func (c *Client) GetJSON(ctx context.Context, path string, out any) error {
-	body, _, err := c.get(ctx, path, true, 0)
+	body, _, err := c.get(ctx, path, true, 0, "")
 	if err != nil {
 		return err
 	}
@@ -258,15 +261,30 @@ func (c *Client) GetJSON(ctx context.Context, path string, out any) error {
 // that would dominate cache size for no benefit, since they are only ever read
 // once per run.
 func (c *Client) GetBytes(ctx context.Context, path string) ([]byte, error) {
-	body, _, err := c.get(ctx, path, false, 0)
+	body, _, err := c.get(ctx, path, false, 0, "")
 	return body, err
 }
 
 // GetBytesLimited is GetBytes with a hard cap on the response size. It exists
 // so an unbounded download, such as an Actions log archive, cannot overshoot a
-// caller's byte budget in a single request.
+// caller's byte budget in a single request. A limit of zero or less means
+// unlimited.
 func (c *Client) GetBytesLimited(ctx context.Context, path string, limit int64) ([]byte, error) {
-	body, _, err := c.get(ctx, path, false, limit)
+	body, _, err := c.get(ctx, path, false, limit, "")
+	return body, err
+}
+
+// GetSARIFLimited requests the SARIF representation of a code scanning
+// analysis (Accept: application/sarif+json) instead of the default JSON
+// metadata representation of the same endpoint, with a hard cap on the
+// response size. A limit of zero or less means unlimited.
+//
+// Like GetBytesLimited, this bypasses the cache: SARIF bodies are large and,
+// once an analysis is created, immutable, so ETag revalidation buys little
+// while routing them through the response cache would reproduce the same
+// unbounded growth already avoided for log archives.
+func (c *Client) GetSARIFLimited(ctx context.Context, path string, limit int64) ([]byte, error) {
+	body, _, err := c.get(ctx, path, false, limit, acceptSARIF)
 	return body, err
 }
 
@@ -275,7 +293,7 @@ func (c *Client) GetBytesLimited(ctx context.Context, path string, limit int64) 
 func (c *Client) GetPaginatedJSON(ctx context.Context, path string, collect func(page []byte) error) error {
 	next := path
 	for next != "" {
-		body, link, err := c.get(ctx, next, true, 0)
+		body, link, err := c.get(ctx, next, true, 0, "")
 		if err != nil {
 			return err
 		}
@@ -290,8 +308,10 @@ func (c *Client) GetPaginatedJSON(ctx context.Context, path string, collect func
 }
 
 // get executes a conditional GET with retries and returns the body plus the
-// URL of the next page, if any.
-func (c *Client) get(ctx context.Context, pathOrURL string, useCache bool, limit int64) ([]byte, string, error) {
+// URL of the next page, if any. An empty accept keeps the client's default
+// Accept header; a non-empty value overrides it for this request only, which
+// is how the SARIF representation of an otherwise-JSON endpoint is requested.
+func (c *Client) get(ctx context.Context, pathOrURL string, useCache bool, limit int64, accept string) ([]byte, string, error) {
 	target := c.resolveURL(pathOrURL)
 
 	var cachedETag string
@@ -310,7 +330,7 @@ func (c *Client) get(ctx context.Context, pathOrURL string, useCache bool, limit
 		if err := c.acquire(ctx); err != nil {
 			return nil, "", err
 		}
-		body, next, status, headers, err := c.do(ctx, target, cachedETag, limit)
+		body, next, status, headers, err := c.do(ctx, target, cachedETag, limit, accept)
 		c.release()
 
 		if err != nil {
@@ -389,13 +409,19 @@ func (c *Client) get(ctx context.Context, pathOrURL string, useCache bool, limit
 	return nil, "", fmt.Errorf("request to %s failed after %d attempts", target, maxAttempts)
 }
 
-func (c *Client) do(ctx context.Context, target, etag string, limit int64) ([]byte, string, int, http.Header, error) {
+func (c *Client) do(ctx context.Context, target, etag string, limit int64, accept string) ([]byte, string, int, http.Header, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
 		return nil, "", 0, nil, err
 	}
 	if etag != "" {
 		req.Header.Set("If-None-Match", etag)
+	}
+	if accept != "" {
+		// go-gh's default-header transport only fills in a header when the
+		// request does not already carry one, so setting it here overrides
+		// the client's default Accept for this request alone.
+		req.Header.Set("Accept", accept)
 	}
 
 	resp, err := c.http.Do(req)
@@ -415,8 +441,15 @@ func (c *Client) do(ctx context.Context, target, etag string, limit int64) ([]by
 	if limit > 0 {
 		// One extra byte distinguishes "exactly at the limit" from
 		// "truncated", so an oversized archive can be reported rather than
-		// silently analyzed as if it were complete.
-		reader = io.LimitReader(resp.Body, limit+1)
+		// silently analyzed as if it were complete. Guard against overflow:
+		// callers may pass math.MaxInt64 to mean "unlimited" (--*-max-mb 0),
+		// and limit+1 on that sentinel wraps to a negative number, which
+		// io.LimitReader treats as a zero-byte read.
+		readLimit := limit
+		if readLimit < math.MaxInt64 {
+			readLimit++
+		}
+		reader = io.LimitReader(resp.Body, readLimit)
 	}
 
 	body, err := io.ReadAll(reader)

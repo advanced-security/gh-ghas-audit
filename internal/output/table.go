@@ -84,7 +84,7 @@ func WriteTable(writer io.Writer, report *model.Report, opts TableOptions) error
 	// "HEALTH" rather than "STATUS" because the report exposes four distinct
 	// status dimensions, and because organizations often define a custom
 	// property literally named "status".
-	headers := []string{"HEALTH", "REPOSITORY", "CONFIG", "EXECUTION", "LAST SCAN", "LANGUAGES"}
+	headers := []string{"HEALTH", "REPOSITORY", "CONFIG", "EXECUTION", "LAST SCAN", "LANGUAGES", "CODEQL VERSION", "QUERY PACKS"}
 	for _, property := range opts.Properties {
 		headers = append(headers, strings.ToUpper(property))
 	}
@@ -104,6 +104,8 @@ func WriteTable(writer io.Writer, report *model.Report, opts TableOptions) error
 		printer.AddField(executionCell(repo), tableprinter.WithTruncate(nil))
 		printer.AddField(lastScanCell(repo), tableprinter.WithTruncate(nil))
 		printer.AddField(languageCell(repo), tableprinter.WithTruncate(nil))
+		printer.AddField(codeqlVersionSummary(repo.Languages), tableprinter.WithTruncate(nil))
+		printer.AddField(queryPacksSummary(repo.Languages), tableprinter.WithTruncate(nil))
 		for _, property := range opts.Properties {
 			value, _ := model.PropertyValue(repo.Properties, property)
 			printer.AddField(value, tableprinter.WithTruncate(nil))
@@ -351,6 +353,93 @@ func containsLanguage(languages []model.Language, wanted model.Language) bool {
 	return false
 }
 
+// codeqlVersionSummary aggregates the CodeQL CLI version known for each of a
+// repository's languages. SARIF is preferred when it was collected; a
+// language whose SARIF fetch was skipped or failed (for example because a
+// known AnalysisError already explains its failure) falls back to the
+// version recovered from Actions logs, so a version is still shown wherever
+// evidence of any kind is available. Languages that share the same version
+// are grouped together and every group is tagged "version[language, ...]",
+// the same "value[language]" convention joinDiagnostics uses, so a reader
+// never has to guess whether a single version shown applies to every
+// language or just one - which matters because a repository mixing CodeQL
+// versions across languages (for example after a partial CLI upgrade) is
+// worth noticing.
+func codeqlVersionSummary(states []model.LanguageState) string {
+	var order []string
+	groups := map[string][]model.Language{}
+	for _, state := range states {
+		version := state.LogCodeQLVersion
+		if state.SARIFCollected && state.CodeQLVersion != "" {
+			version = state.CodeQLVersion
+		}
+		if version == "" {
+			continue
+		}
+		if _, ok := groups[version]; !ok {
+			order = append(order, version)
+		}
+		groups[version] = append(groups[version], state.Language)
+	}
+	if len(order) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(order))
+	for _, version := range order {
+		parts = append(parts, fmt.Sprintf("%s[%s]", version, model.JoinLanguages(groups[version])))
+	}
+	return strings.Join(parts, "; ")
+}
+
+// queryPacksSummary lists every query pack SARIF reported across a
+// repository's languages, tagging each pack "name@version[language]" so packs
+// from different languages - or a SARIFLanguage that disagrees with the
+// analysis category - are never conflated into one undifferentiated list.
+func queryPacksSummary(states []model.LanguageState) string {
+	var parts []string
+	for _, state := range states {
+		if !state.SARIFCollected {
+			continue
+		}
+		for _, pack := range state.QueryPacks {
+			parts = append(parts, fmt.Sprintf("%s[%s]", pack, state.Language))
+		}
+	}
+	return strings.Join(parts, "; ")
+}
+
+// sarifSummary condenses per-language SARIF detail (collected/mismatched/
+// failed) into a single line for the table's DETAIL column; the full
+// per-language breakdown is only exposed in the language CSV/JSON exports.
+func sarifSummary(repo model.Repo) string {
+	var collected, attempted int
+	var mismatched, failed []string
+	for _, state := range repo.Languages {
+		switch {
+		case state.SARIFCollected:
+			collected++
+			attempted++
+			if state.SARIFLanguageMismatch {
+				mismatched = append(mismatched, string(state.Language))
+			}
+		case state.SARIFError != "":
+			attempted++
+			failed = append(failed, string(state.Language))
+		}
+	}
+	if attempted == 0 {
+		return ""
+	}
+	summary := fmt.Sprintf("SARIF %d/%d collected", collected, attempted)
+	if len(mismatched) > 0 {
+		summary += "; language mismatch: " + strings.Join(mismatched, ", ")
+	}
+	if len(failed) > 0 {
+		summary += "; SARIF error: " + strings.Join(failed, ", ")
+	}
+	return summary
+}
+
 func detailCell(repo model.Repo) string {
 	parts := append([]string(nil), repo.Status.Reasons...)
 	for _, diagnostic := range repo.Diagnostics {
@@ -359,6 +448,9 @@ func detailCell(repo model.Repo) string {
 			message += " (from logs)"
 		}
 		parts = append(parts, message)
+	}
+	if summary := sarifSummary(repo); summary != "" {
+		parts = append(parts, summary)
 	}
 	parts = append(parts, repo.Errors...)
 	seen := make(map[string]bool, len(parts))

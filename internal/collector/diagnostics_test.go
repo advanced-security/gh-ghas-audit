@@ -23,11 +23,49 @@ func (c cleanLogs) GetBytesLimited(context.Context, string, int64) ([]byte, erro
 
 type truncatedLogs struct{}
 
-func (truncatedLogs) Inspect(context.Context, string, string, int64) ([]model.Diagnostic, error) {
+func (truncatedLogs) Inspect(context.Context, string, string, int64) ([]model.Diagnostic, map[model.Language]string, error) {
 	return []model.Diagnostic{{
 		Source: model.SourceLog, Severity: "warning", Code: "low-quality-scan",
 		Message: "low analysis quality",
-	}}, diagnostics.ErrDiagnosticsTruncated
+	}}, nil, diagnostics.ErrDiagnosticsTruncated
+}
+
+// versionedLogs is a LogFetcher stub that reports no diagnostics but a
+// per-language CodeQL CLI version, exercising the path that lets a language
+// surface a version even when it has no diagnostics of its own.
+type versionedLogs struct{ versions map[model.Language]string }
+
+func (v versionedLogs) Inspect(context.Context, string, string, int64) ([]model.Diagnostic, map[model.Language]string, error) {
+	return nil, v.versions, nil
+}
+
+func TestDeepDiagnosticsAttachesLogCodeQLVersionToMatchingLanguage(t *testing.T) {
+	client := buildClient(t, scenario{
+		name:         "logged-version",
+		languages:    []string{"Go"},
+		defaultSetup: defaultSetup{State: "configured", Languages: []string{"go"}},
+		workflows:    codeqlWorkflows(),
+		runs:         map[string]any{"": runList("success", time.Hour)},
+		jobs:         jobsFor(map[string]string{"go": "success"}),
+		databases:    databasesFor([]string{"go"}, time.Hour),
+	})
+	options := defaultActivityOptions()
+	options.Depth = DepthDiagnostics
+	options.DeepDiagnostics = DeepDiagnosticsAll
+	options.LogFetcher = versionedLogs{versions: map[model.Language]string{model.LangGo: "2.27.0"}}
+
+	report := collect(t, client, options)
+	repo := findRepo(t, report, "logged-version")
+
+	var state *model.LanguageState
+	for index := range repo.Languages {
+		if repo.Languages[index].Language == model.LangGo {
+			state = &repo.Languages[index]
+		}
+	}
+	if state == nil || state.LogCodeQLVersion != "2.27.0" {
+		t.Fatalf("log-derived CodeQL version was not attached: %+v", repo.Languages)
+	}
 }
 
 func TestTruncatedDiagnosticsRetainWarningsAndMarkIncomplete(t *testing.T) {

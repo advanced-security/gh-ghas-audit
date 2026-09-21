@@ -506,3 +506,29 @@ func TestFailedAnalysisOutsideActionsDoesNotInventWorkflowHealth(t *testing.T) {
 		t.Fatalf("external analysis was misclassified as an Actions workflow: %+v", repo.Status)
 	}
 }
+
+// An external-CI analysis with a free-form category (no "/language:<name>"
+// convention, since there is no managed workflow to have written it) is not
+// evidence of Actions workflow health, but its SARIF is still worth
+// cross-checking. The category must survive the early return that
+// short-circuits the rest of collectRepository for external CI.
+func TestExternalCIPreservesUnmatchedCategoryForSARIF(t *testing.T) {
+	analysed := time.Now().Add(-2 * time.Hour)
+	client := buildClient(t, scenario{
+		name:         "external-ci-custom",
+		languages:    []string{"Go"},
+		defaultSetup: defaultSetup{State: "not-configured"},
+	})
+	client.set("repos/"+testOrg+"/external-ci-custom/code-scanning/analyses", []codeScanningAnalysis{
+		{Category: "my-custom-scanner", AnalysisKey: "jenkins-pipeline", CreatedAt: &analysed, Results: 1, AnalysisID: 999},
+	})
+
+	repo := findRepo(t, collect(t, client, defaultActivityOptions()), "external-ci-custom")
+
+	if repo.Status.Configuration != model.ConfigExternalCI {
+		t.Fatalf("configuration = %q, want external-ci", repo.Status.Configuration)
+	}
+	if len(repo.PendingSARIFAnalyses) != 1 || repo.PendingSARIFAnalyses[0].Category != "my-custom-scanner" {
+		t.Fatalf("external CI's unmatched category was discarded before SARIF could see it: %+v", repo.PendingSARIFAnalyses)
+	}
+}

@@ -94,6 +94,44 @@ func TestClearRemovesEntries(t *testing.T) {
 	}
 }
 
+// Size lets an end-of-run summary tell an operator how much space the
+// metadata cache uses and whether --refresh is worth running, so it must
+// reflect saved entries on disk, not just what happens to be in memory.
+func TestSizeReportsSavedEntries(t *testing.T) {
+	dir := t.TempDir()
+	store := New(Options{Dir: dir, SchemaKey: "v1"})
+
+	if bytes, entries, err := store.Size(); err != nil || bytes != 0 || entries != 0 {
+		t.Fatalf("an empty cache must report zero size, got %d bytes, %d entries, err %v", bytes, entries, err)
+	}
+
+	store.Put("https://api.github.com/one", `"etag-1"`, []byte(`{"value":1}`), "")
+	store.Put("https://api.github.com/two", `"etag-2"`, []byte(`{"value":2}`), "")
+	if err := store.Save(); err != nil {
+		t.Fatalf("Save returned an error: %v", err)
+	}
+
+	bytes, entries, err := store.Size()
+	if err != nil {
+		t.Fatalf("Size returned an error: %v", err)
+	}
+	if entries != 2 {
+		t.Fatalf("entries = %d, want 2", entries)
+	}
+	if bytes <= 0 {
+		t.Fatalf("bytes = %d, want a positive size for saved entries", bytes)
+	}
+}
+
+// A disabled cache (empty Dir, e.g. --no-cache) has no directory to measure,
+// and Size must say so rather than erroring or fabricating a number.
+func TestSizeOfDisabledCacheIsZero(t *testing.T) {
+	store := New(Options{SchemaKey: "v1"})
+	if bytes, entries, err := store.Size(); err != nil || bytes != 0 || entries != 0 {
+		t.Fatalf("a disabled cache must report zero size, got %d bytes, %d entries, err %v", bytes, entries, err)
+	}
+}
+
 func TestSchemaChangesReplaceTheSameCacheEntry(t *testing.T) {
 	dir := t.TempDir()
 	for _, schema := range []string{"v1", "v2", "v3"} {

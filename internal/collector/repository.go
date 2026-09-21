@@ -148,6 +148,14 @@ func (c *Collector) collectRepository(ctx context.Context, org string, source ap
 					repo.Status.Freshness = model.FreshUnknown
 					repo.Status.Coverage = model.CoverageUnknown
 					repo.Languages = languages.Sorted()
+					// External CI's analyses never match the
+					// "language:<name>" category convention (there is no
+					// managed workflow to have written it), so every one of
+					// them is unmatched. Preserving them here, not just on
+					// the managed-workflow paths below, means a custom/API
+					// upload's SARIF is still fetched and cross-checked even
+					// though its execution health is not evaluated.
+					repo.PendingSARIFAnalyses = report.Unmatched
 					repo.Diagnostics = append(repo.Diagnostics, model.Diagnostic{
 						Source:   model.SourceAPI,
 						Severity: "info",
@@ -184,6 +192,9 @@ func (c *Collector) collectRepository(ctx context.Context, org string, source ap
 		repo.Errors = append(repo.Errors, fmt.Sprintf("analyses: %v", err))
 	}
 	applyAnalyses(report, languages, evidence, repo.Execution.LatestCompletedRun)
+	if report != nil {
+		repo.PendingSARIFAnalyses = report.Unmatched
+	}
 
 	finalizeLanguages(&repo, languages)
 	repo.Status.Freshness = c.freshness(&repo)
@@ -362,9 +373,10 @@ func resolveConfigurationStatus(setup *defaultSetup, setupErr error, attachment 
 // analysis. It comes from a stable, documented API, which makes it the
 // preferred source of failure attribution over parsing Actions logs.
 type analysisSummary struct {
-	CreatedAt *time.Time
-	Error     string
-	Results   int
+	CreatedAt  *time.Time
+	Error      string
+	Results    int
+	AnalysisID int64
 }
 
 // analysisReport is the result of reading a repository's code scanning
@@ -382,6 +394,12 @@ type analysisReport struct {
 	// DefaultSetup reports whether that workflow is the managed default setup
 	// workflow rather than one the repository controls.
 	DefaultSetup bool
+	// Unmatched carries analyses whose category did not resolve to a known
+	// language by name alone (custom or API-based uploads are not guaranteed
+	// to follow the "language:<name>" convention). They are kept, one per
+	// distinct category, so a SARIF-based language cross-check can still run
+	// for them instead of silently dropping their AnalysisID.
+	Unmatched []model.PendingSARIFAnalysis
 }
 
 // analysisCategoryPattern extracts the language from an analysis category such
@@ -507,11 +525,14 @@ func (c *Collector) collectAnalyses(
 		}
 
 		match := analysisCategoryPattern.FindStringSubmatch(analysis.Category)
-		if match == nil {
-			continue
+		language, ok := model.Language(""), false
+		if match != nil {
+			language, ok = model.NormalizeLanguage(match[1])
 		}
-		language, ok := model.NormalizeLanguage(match[1])
 		if !ok {
+			if analysis.AnalysisID != 0 {
+				report.recordUnmatched(analysis.Category, analysis.AnalysisID)
+			}
 			continue
 		}
 		// Newest first, so an existing entry is already the current one.
@@ -519,13 +540,28 @@ func (c *Collector) collectAnalyses(
 			continue
 		}
 		report.Languages[language] = &analysisSummary{
-			CreatedAt: analysis.CreatedAt,
-			Error:     strings.TrimSpace(analysis.Error),
-			Results:   analysis.Results,
+			CreatedAt:  analysis.CreatedAt,
+			Error:      strings.TrimSpace(analysis.Error),
+			Results:    analysis.Results,
+			AnalysisID: analysis.AnalysisID,
 		}
 	}
 
 	return report, nil
+}
+
+// recordUnmatched keeps the newest analysis ID for one distinct category that
+// did not resolve to a known language, so applySarifDiagnostics can still
+// attempt a SARIF-based language cross-check for it later.
+func (r *analysisReport) recordUnmatched(category string, analysisID int64) {
+	for _, existing := range r.Unmatched {
+		if existing.Category == category {
+			// Analyses are visited newest first; the first one seen for this
+			// category is already the current one.
+			return
+		}
+	}
+	r.Unmatched = append(r.Unmatched, model.PendingSARIFAnalysis{AnalysisID: analysisID, Category: category})
 }
 
 // applyAnalyses records per-language analysis evidence.
@@ -560,6 +596,7 @@ func applyAnalyses(
 		}
 		results := summary.Results
 		state.ResultsCount = &results
+		state.AnalysisID = summary.AnalysisID
 
 		if summary.Error != "" {
 			state.AnalysisError = summary.Error
@@ -645,6 +682,7 @@ func (c *Collector) evaluateAdvancedSetup(
 	repo.ConfiguredLanguages = configured
 
 	applyAnalyses(report, languages, evidence, repo.Execution.LatestCompletedRun)
+	repo.PendingSARIFAnalyses = report.Unmatched
 
 	finalizeLanguages(repo, languages)
 	repo.Status.Freshness = c.freshness(repo)

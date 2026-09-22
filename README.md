@@ -8,8 +8,6 @@ A [GitHub CLI][gh-cli] extension for CodeQL configuration, execution, freshness 
 gh extension install advanced-security/gh-ghas-audit
 ```
 
-These instructions describe **v2**. Until v2 is released, build this branch with Go 1.23 or later. See [Upgrading from 1.x](#upgrading-from-1x) for breaking changes.
-
 ## Quick start
 
 ```bash
@@ -27,6 +25,8 @@ stale     my-org/legacy-api  configured      success      41 days ago 2/2
 degraded  my-org/web         advanced-setup  success      today       1/1 (not configured: python)
 healthy   my-org/identity    configured      success      today       3/3
 ```
+
+The table above is one row per repository. For a per-language breakdown (one row per repository/language pair), use `--format language-csv` instead; see [Output and exit codes](#output-and-exit-codes).
 
 ## Scan depth
 
@@ -171,8 +171,7 @@ Each language records `runtime_evaluation`: `not-evaluated`, `evaluated` or `inc
 For a compliance audit where completeness must not be capped by a default budget, run diagnostics depth against every repository with every ceiling set to `0` (unlimited):
 
 ```sh
-gh ghas-audit code-scanning -o my-org --scan-depth diagnostics --deep-scope all \
-  --deep-diagnostics-max-repos 0 --deep-diagnostics-max-mb 0 --deep-diagnostics-max-sarif-mb 0
+gh ghas-audit code-scanning -o my-org --scan-depth diagnostics --deep-scope all --deep-diagnostics-max-repos 0 --deep-diagnostics-max-mb 0 --deep-diagnostics-max-sarif-mb 0
 ```
 
 This is the deepest evidence tier the tool can produce: `--deep-scope all` inspects every repository, not just those already flagged as needing attention, and the three `0` budgets remove the repository-count, log-byte and SARIF-byte ceilings that would otherwise stop collection early on a large organization. Use this as the reference command for a full compliance sweep; the defaults above exist specifically to keep an accidental unbounded run from happening.
@@ -237,32 +236,6 @@ GitHub App installation tokens work per organization, not for enterprise discove
 Install and invoke the CLI in a workflow. [`examples/code-scanning-status.yml`](examples/code-scanning-status.yml) uses App authentication, cache reuse, one collection, a job summary and artifact upload.
 
 The App-token example is limited to runs under one hour. Split larger scopes or run long diagnostics directly with suitable longer-lived credentials.
-
-## Upgrading from 1.x
-
-**V2 replaces the legacy implementation.** There is no `status` subcommand or compatibility implementation.
-
-| Previous invocation / behavior | V2 |
-| --- | --- |
-| `code-scanning -o ORG` ran a configuration audit | Defaults to `--scan-depth health` |
-| Configuration-only audit | Add `--scan-depth config`; all modern formats, filters, caching and enterprise scope remain available |
-| `code-scanning status ...` from development builds | Remove `status` |
-| `--csv-output audit.csv` | Use `--format csv --output audit.csv` |
-| Six-column legacy CSV | Expanded schema at every depth; parse headers, not positions |
-
-```bash
-gh ghas-audit code-scanning -o my-org --scan-depth config --format csv --output audit.csv
-```
-
-| 1.x CSV column | V2 column / change |
-| --- | --- |
-| `Organization`, `Repository` | Same names |
-| `Default setup enabled?` | `Configuration status`: `Enabled`/`Disabled`/`Unknown` become status enums |
-| `Languages in repo` | `Detected languages`, with aliases normalized |
-| `Default setup configured` | `Configured languages`, populated only from active configuration or advanced evidence |
-| `Not configured (supported languages)` | `Languages not configured`, including entirely unconfigured repositories |
-
-Depth selects evidence, **not the old CSV schema or old bugs**. Corrected state checks and language normalization can change gap counts without repository changes.
 
 ## License and support
 

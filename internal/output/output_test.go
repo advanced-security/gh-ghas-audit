@@ -334,6 +334,39 @@ func TestWriteCSVIncludesCodeqlVersionAndQueryPacksColumns(t *testing.T) {
 	}
 }
 
+// The repository-level "SARIF collected" column is the only place a reader of
+// the plain csv format (as opposed to language-csv) can see whether SARIF was
+// used at all, so it must roll up collected/attempted across languages and
+// call out mismatches or failures, while staying blank when SARIF was never
+// attempted for that repository.
+func TestWriteCSVIncludesSarifCollectedColumn(t *testing.T) {
+	report := sampleReport()
+	repo := &report.Repositories[0]
+	repo.Languages[0].SARIFCollected = true
+	repo.Languages[1].SARIFError = "HTTP 422"
+
+	var buffer bytes.Buffer
+	if err := WriteCSV(&buffer, report, nil); err != nil {
+		t.Fatalf("WriteCSV returned an error: %v", err)
+	}
+
+	records, err := csv.NewReader(&buffer).ReadAll()
+	if err != nil {
+		t.Fatalf("emitted CSV is not parseable: %v", err)
+	}
+	index := map[string]int{}
+	for position, name := range records[0] {
+		index[name] = position
+	}
+
+	if got, want := records[1][index["SARIF collected"]], "1/2; SARIF error: python"; got != want {
+		t.Errorf("SARIF collected column = %q, want %q", got, want)
+	}
+	if got := records[2][index["SARIF collected"]]; got != "" {
+		t.Errorf("SARIF collected column = %q, want blank when SARIF was never attempted", got)
+	}
+}
+
 func TestWriteLanguageCSVEmitsOneRowPerLanguage(t *testing.T) {
 	var buffer bytes.Buffer
 	if err := WriteLanguageCSV(&buffer, sampleReport(), []string{"application"}); err != nil {

@@ -408,12 +408,12 @@ func queryPacksSummary(states []model.LanguageState) string {
 	return strings.Join(parts, "; ")
 }
 
-// sarifSummary condenses per-language SARIF detail (collected/mismatched/
-// failed) into a single line for the table's DETAIL column; the full
-// per-language breakdown is only exposed in the language CSV/JSON exports.
-func sarifSummary(repo model.Repo) string {
-	var collected, attempted int
-	var mismatched, failed []string
+// sarifCollectionCounts tallies per-language SARIF outcomes for a repository:
+// how many languages had SARIF collected versus attempted, plus which
+// languages disagreed on language (mismatched) or failed outright. It is
+// shared by the table's DETAIL cell and the repository-level CSV/JSON summary
+// so both surfaces agree on what "attempted" means.
+func sarifCollectionCounts(repo model.Repo) (collected, attempted int, mismatched, failed []string) {
 	for _, state := range repo.Languages {
 		switch {
 		case state.SARIFCollected:
@@ -427,10 +427,37 @@ func sarifSummary(repo model.Repo) string {
 			failed = append(failed, string(state.Language))
 		}
 	}
+	return collected, attempted, mismatched, failed
+}
+
+// sarifSummary condenses per-language SARIF detail (collected/mismatched/
+// failed) into a single line for the table's DETAIL column; the full
+// per-language breakdown is only exposed in the language CSV/JSON exports.
+func sarifSummary(repo model.Repo) string {
+	collected, attempted, mismatched, failed := sarifCollectionCounts(repo)
 	if attempted == 0 {
 		return ""
 	}
 	summary := fmt.Sprintf("SARIF %d/%d collected", collected, attempted)
+	if len(mismatched) > 0 {
+		summary += "; language mismatch: " + strings.Join(mismatched, ", ")
+	}
+	if len(failed) > 0 {
+		summary += "; SARIF error: " + strings.Join(failed, ", ")
+	}
+	return summary
+}
+
+// sarifCollectedSummary is the compact repository-level rollup used by the
+// "SARIF collected" CSV/JSON column: "collected/attempted" plus any language
+// mismatch or SARIF error notes, or blank when SARIF was never attempted
+// (--no-sarif, a depth below diagnostics, or no successful analyses).
+func sarifCollectedSummary(repo model.Repo) string {
+	collected, attempted, mismatched, failed := sarifCollectionCounts(repo)
+	if attempted == 0 {
+		return ""
+	}
+	summary := fmt.Sprintf("%d/%d", collected, attempted)
 	if len(mismatched) > 0 {
 		summary += "; language mismatch: " + strings.Join(mismatched, ", ")
 	}

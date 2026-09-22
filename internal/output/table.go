@@ -411,8 +411,8 @@ func queryPacksSummary(states []model.LanguageState) string {
 // sarifCollectionCounts tallies per-language SARIF outcomes for a repository:
 // how many languages had SARIF collected versus attempted, plus which
 // languages disagreed on language (mismatched) or failed outright. It is
-// shared by the table's DETAIL cell and the repository-level CSV/JSON summary
-// so both surfaces agree on what "attempted" means.
+// shared by the table's DETAIL cell and the repository CSV's "SARIF
+// collected" column so both surfaces agree on what "attempted" means.
 func sarifCollectionCounts(repo model.Repo) (collected, attempted int, mismatched, failed []string) {
 	for _, state := range repo.Languages {
 		switch {
@@ -449,9 +449,10 @@ func sarifSummary(repo model.Repo) string {
 }
 
 // sarifCollectedSummary is the compact repository-level rollup used by the
-// "SARIF collected" CSV/JSON column: "collected/attempted" plus any language
-// mismatch or SARIF error notes, or blank when SARIF was never attempted
-// (--no-sarif, a depth below diagnostics, or no successful analyses).
+// repository CSV's "SARIF collected" column: "collected/attempted" plus any
+// language mismatch or SARIF error notes, or blank when SARIF was never
+// attempted (--no-sarif, a depth below diagnostics, or no successful
+// analyses).
 func sarifCollectedSummary(repo model.Repo) string {
 	collected, attempted, mismatched, failed := sarifCollectionCounts(repo)
 	if attempted == 0 {

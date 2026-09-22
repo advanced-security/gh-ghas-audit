@@ -145,7 +145,7 @@ gh ghas-audit code-scanning -o my-org --fail-on failing,stalled
 | `csv` | One row per repository | `CodeQL version`, `Query packs`, `SARIF collected` (e.g. `6/6`), each rolled up across languages |
 | `language-csv` | One row per repository/language | `Log CodeQL version`, per-language `SARIF collected`, query pack, rule count, results by level, artifact count, language mismatch |
 
-`--no-sarif` drops the SARIF-derived columns above. Both CSV formats add `Evidence complete`, plus a `Property: NAME` column per requested custom property.
+`--no-sarif` leaves the SARIF-derived columns above blank rather than removing them; the CSV schema is unaffected. Both CSV formats add `Evidence complete`, plus a `Property: NAME` column per requested custom property.
 
 Each language records `runtime_evaluation`: `not-evaluated`, `evaluated` or `incomplete`. Uncollected values are null in JSON/NDJSON, blank in language CSV.
 

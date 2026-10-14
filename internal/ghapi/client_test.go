@@ -8,11 +8,14 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/cli/go-gh/v2/pkg/api"
 )
 
 // newTestClient builds a Client aimed at a test server. It constructs the
@@ -23,6 +26,45 @@ func newTestClient(server *httptest.Server, store ResponseCache) *Client {
 		host:      "github.com",
 		restBase:  server.URL + "/",
 		cache:     store,
+		stats:     &Stats{},
+		semaphore: make(chan struct{}, 4),
+	}
+}
+
+// redirectTransport rewrites every outgoing request to target a local test
+// server, regardless of the host api.NewGraphQLClient resolved for it. This
+// lets tests exercise the real go-gh GraphQL client end to end without a `gh
+// auth login` in the test environment.
+type redirectTransport struct {
+	target *url.URL
+}
+
+func (t *redirectTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	redirected := req.Clone(req.Context())
+	redirected.URL.Scheme = t.target.Scheme
+	redirected.URL.Host = t.target.Host
+	redirected.Host = t.target.Host
+	return http.DefaultTransport.RoundTrip(redirected)
+}
+
+// newTestGraphQLClient builds a Client whose GraphQL requests are redirected
+// to a local test server.
+func newTestGraphQLClient(t *testing.T, server *httptest.Server) *Client {
+	t.Helper()
+	target, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("parsing test server URL: %v", err)
+	}
+	graphqlClient, err := api.NewGraphQLClient(api.ClientOptions{
+		Host:      "github.com",
+		AuthToken: "test-token",
+		Transport: &redirectTransport{target: target},
+	})
+	if err != nil {
+		t.Fatalf("creating test GraphQL client: %v", err)
+	}
+	return &Client{
+		graphql:   graphqlClient,
 		stats:     &Stats{},
 		semaphore: make(chan struct{}, 4),
 	}
@@ -89,6 +131,190 @@ func TestExhaustedRateLimitIsReportedAsRateLimited(t *testing.T) {
 	}
 	if IsForbidden(err) {
 		t.Fatal("a rate limit must not be reported as a permission problem")
+	}
+}
+
+// The GraphQL transport surfaces non-2xx responses as *api.HTTPError rather
+// than the *StatusError the REST path uses, so a secondary rate limit must be
+// recognized from that type too or the GraphQL query fails on its first hit
+// instead of being retried like an equivalent REST call.
+func TestGraphQLSecondaryRateLimitIsRetried(t *testing.T) {
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		requests++
+		if requests == 1 {
+			writer.Header().Set("Content-Type", "application/json")
+			writer.WriteHeader(http.StatusForbidden)
+			fmt.Fprint(writer, `{"message":"You have exceeded a secondary rate limit. Please wait a few minutes before you try again."}`)
+			return
+		}
+		fmt.Fprint(writer, `{"data":{"repository":{"name":"ok"}}}`)
+	}))
+	defer server.Close()
+
+	client := newTestGraphQLClient(t, server)
+
+	var response struct {
+		Repository struct {
+			Name string
+		}
+	}
+	if err := client.GraphQL(context.Background(), "query{repository{name}}", nil, &response); err != nil {
+		t.Fatalf("a secondary rate limit should be retried: %v", err)
+	}
+	if response.Repository.Name != "ok" || requests != 2 {
+		t.Fatalf("name = %q after %d requests", response.Repository.Name, requests)
+	}
+	if client.Stats().RateLimitWaits.Load() != 1 {
+		t.Fatalf("rate limit waits = %d, want 1", client.Stats().RateLimitWaits.Load())
+	}
+}
+
+// Once the retry budget is exhausted, a GraphQL rate limit must be
+// identifiable as such so callers never record it as a repository's health,
+// the same guarantee the REST path already provides.
+func TestGraphQLExhaustedRateLimitIsReportedAsRateLimited(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		writer.WriteHeader(http.StatusForbidden)
+		fmt.Fprint(writer, `{"message":"You have exceeded a secondary rate limit"}`)
+	}))
+	defer server.Close()
+
+	client := newTestGraphQLClient(t, server)
+
+	err := client.GraphQL(context.Background(), "query{repository{name}}", nil, &struct{}{})
+	if err == nil {
+		t.Fatal("expected an error after exhausting retries")
+	}
+	if !IsRateLimited(err) {
+		t.Fatalf("error should be identifiable as a rate limit, got %v", err)
+	}
+}
+
+// GitHub's GraphQL endpoint can return a 502/503/504 when its own
+// infrastructure falters; this is unrelated to rate limiting and unrelated
+// to the query itself, so it must be retried rather than reported as a
+// permanent failure on the first occurrence.
+func TestGraphQLBadGatewayIsRetried(t *testing.T) {
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		requests++
+		if requests == 1 {
+			writer.Header().Set("Content-Type", "application/json")
+			writer.WriteHeader(http.StatusBadGateway)
+			fmt.Fprint(writer, `{"message":"502 Bad Gateway"}`)
+			return
+		}
+		fmt.Fprint(writer, `{"data":{"repository":{"name":"ok"}}}`)
+	}))
+	defer server.Close()
+
+	client := newTestGraphQLClient(t, server)
+
+	var response struct {
+		Repository struct {
+			Name string
+		}
+	}
+	if err := client.GraphQL(context.Background(), "query{repository{name}}", nil, &response); err != nil {
+		t.Fatalf("a 502 should be retried: %v", err)
+	}
+	if response.Repository.Name != "ok" || requests != 2 {
+		t.Fatalf("name = %q after %d requests", response.Repository.Name, requests)
+	}
+}
+
+// GitHub's GraphQL engine can report a field-level execution timeout (an
+// application-level error in the response body's "errors" array, distinct
+// from any HTTP status code or transport failure) for expensive fields such
+// as dependencyGraphManifests. This is ordinarily transient load, not a
+// permanently broken query, so it must be retried.
+func TestGraphQLFieldTimeoutIsRetried(t *testing.T) {
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		requests++
+		writer.Header().Set("Content-Type", "application/json")
+		if requests == 1 {
+			fmt.Fprint(writer, `{"data":null,"errors":[{"message":"timedout","path":["repository","dependencyGraphManifests"]}]}`)
+			return
+		}
+		fmt.Fprint(writer, `{"data":{"repository":{"name":"ok"}}}`)
+	}))
+	defer server.Close()
+
+	client := newTestGraphQLClient(t, server)
+
+	var response struct {
+		Repository struct {
+			Name string
+		}
+	}
+	if err := client.GraphQL(context.Background(), "query{repository{name}}", nil, &response); err != nil {
+		t.Fatalf("a field execution timeout should be retried: %v", err)
+	}
+	if response.Repository.Name != "ok" || requests != 2 {
+		t.Fatalf("name = %q after %d requests", response.Repository.Name, requests)
+	}
+}
+
+// A genuine query problem (an invalid field, a bad argument, and so on) fails
+// identically on every attempt; it must not be masked behind a retry loop
+// just because it is a GraphQL response-level error.
+func TestGraphQLNonTransientErrorIsNotRetried(t *testing.T) {
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		requests++
+		writer.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(writer, `{"data":null,"errors":[{"message":"Field 'bogus' doesn't exist on type 'Repository'","path":["repository","bogus"]}]}`)
+	}))
+	defer server.Close()
+
+	client := newTestGraphQLClient(t, server)
+
+	err := client.GraphQL(context.Background(), "query{repository{bogus}}", nil, &struct{}{})
+	if err == nil {
+		t.Fatal("expected an error for an invalid query field")
+	}
+	if requests != 1 {
+		t.Fatalf("a non-transient GraphQL error must not be retried, got %d requests", requests)
+	}
+}
+
+// A 200 response whose body is empty or truncated (for example a connection
+// cut mid-transfer after the status line was already sent) fails
+// json.Unmarshal with Go's "unexpected end of JSON input" error. This is a
+// read-completeness failure of the HTTP layer, not a problem with the query,
+// and looks identical to a genuine transport error on retry; it must be
+// retried rather than reported as a permanent failure on the first
+// occurrence, exactly like a connection reset or timeout would be.
+func TestGraphQLTruncatedResponseBodyIsRetried(t *testing.T) {
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		requests++
+		writer.Header().Set("Content-Type", "application/json")
+		if requests == 1 {
+			// An empty body with a 200 status reproduces exactly the
+			// "unexpected end of JSON input" error json.Unmarshal returns
+			// for a truncated response.
+			return
+		}
+		fmt.Fprint(writer, `{"data":{"repository":{"name":"ok"}}}`)
+	}))
+	defer server.Close()
+
+	client := newTestGraphQLClient(t, server)
+
+	var response struct {
+		Repository struct {
+			Name string
+		}
+	}
+	if err := client.GraphQL(context.Background(), "query{repository{name}}", nil, &response); err != nil {
+		t.Fatalf("a truncated response body should be retried: %v", err)
+	}
+	if response.Repository.Name != "ok" || requests != 2 {
+		t.Fatalf("name = %q after %d requests", response.Repository.Name, requests)
 	}
 }
 

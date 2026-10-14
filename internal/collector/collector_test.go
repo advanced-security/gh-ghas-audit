@@ -403,6 +403,40 @@ func TestHealthyRepositoryIsReportedHealthy(t *testing.T) {
 	}
 }
 
+// TestVerboseReportsEachRepository verifies that Verbose emits a
+// per-repository progress message (name and status), instead of only the
+// batched "N/M repositories inspected" count.
+func TestVerboseReportsEachRepository(t *testing.T) {
+	client := buildClient(t, scenario{
+		name:      "healthy",
+		languages: []string{"Go"},
+		defaultSetup: defaultSetup{
+			State: "configured", Languages: []string{"go"},
+			QuerySuite: "default", Schedule: "weekly",
+		},
+		workflows: codeqlWorkflows(),
+		runs: map[string]any{
+			"": runList("success", 2*24*time.Hour),
+		},
+		jobs:      jobsFor(map[string]string{"go": "success"}),
+		databases: databasesFor([]string{"go"}, 2*24*time.Hour),
+	})
+
+	var messages []string
+	report := collect(t, client, Options{Verbose: true, Progress: func(message string) { messages = append(messages, message) }})
+	findRepo(t, report, "healthy")
+
+	found := false
+	for _, message := range messages {
+		if strings.Contains(message, "healthy") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected a verbose per-repository message mentioning the repository name, got %v", messages)
+	}
+}
+
 // This is the failure mode customers report most often: the workflow is green,
 // so every coverage view shows the repository as protected, while one language
 // silently produced nothing.

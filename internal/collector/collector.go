@@ -143,6 +143,9 @@ type Options struct {
 
 	// Progress receives human-readable progress messages.
 	Progress func(message string)
+	// Verbose reports every repository by name and status as it completes,
+	// instead of only a running count every 25 repositories.
+	Verbose bool
 	// OnRepository is invoked as each repository completes, enabling
 	// streaming output for very large estates. Calls are serialized, so the
 	// callback does not need to be safe for concurrent use.
@@ -404,7 +407,14 @@ func (c *Collector) collectOrganization(ctx context.Context, org string) ([]mode
 		eligible = append(eligible, source)
 	}
 
-	c.progress("Scanning %s: %d of %d repositories in scope", org, len(eligible), len(sources))
+	workers := c.options.Concurrency
+	if workers > len(eligible) {
+		workers = len(eligible)
+	}
+	if workers < 1 {
+		workers = 1
+	}
+	c.progress("Scanning %s: %d of %d repositories in scope (up to %d concurrently)", org, len(eligible), len(sources), workers)
 
 	return c.scanRepositories(ctx, org, eligible, properties, configurations, configurationEvidenceError)
 }
@@ -467,6 +477,7 @@ func (c *Collector) scanRepositories(
 					return
 				}
 				source := sources[index]
+				started := time.Now()
 
 				extra := repoContext{Properties: c.filterProperties(properties[source.Name])}
 				if configurationEvidenceError != "" {
@@ -482,6 +493,7 @@ func (c *Collector) scanRepositories(
 				repo := c.collectRepository(ctx, org, source, extra)
 				c.applyDeepDiagnostics(ctx, &repo)
 				c.applySarifDiagnostics(ctx, &repo)
+				elapsed := time.Since(started)
 
 				// Each worker owns a distinct index, so the shared slices are
 				// written without contention.
@@ -493,7 +505,9 @@ func (c *Collector) scanRepositories(
 					c.options.OnRepository(repo)
 				}
 				completed++
-				if completed%25 == 0 || completed == len(sources) {
+				if c.options.Verbose {
+					c.progress("  %s/%s: %s (%d/%d, %s)", org, source.Name, repo.Status.Overall, completed, len(sources), elapsed.Round(time.Millisecond*100))
+				} else if completed%25 == 0 || completed == len(sources) {
 					c.progress("  %s: %d/%d repositories inspected", org, completed, len(sources))
 				}
 				progressMu.Unlock()

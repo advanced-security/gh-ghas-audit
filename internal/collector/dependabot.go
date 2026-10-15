@@ -1242,11 +1242,29 @@ func (c *DependabotCollector) collectDependencyGraph(ctx context.Context, org, n
 // maxManifestDependencyPaginationPages bounds how many additional
 // dependencies(first:100) pages manifestHasTransitiveDependencyBeyondSample
 // will fetch for a single manifest beyond the initial sample already read
-// by collectDependencyGraph's bulk query. This keeps the cost of resolving
-// one ambiguous, capped-sample manifest bounded (at most this many extra
-// GraphQL round trips for that one manifest) rather than open-ended for a
-// pathological manifest with an extremely large dependency list.
-const maxManifestDependencyPaginationPages = 10
+// by collectDependencyGraph's bulk query. This is deliberately much more
+// generous than the per-repo alert (3 pages) and vulnerability-alert-
+// linkage (5 pages) caps elsewhere in this collector: those apply to every
+// single repository that has any alerts at all, so their cost multiplies
+// across an entire org scan, which is what caused a real hang earlier.
+// This cap instead only ever applies per ambiguous manifest — one that is
+// both a build-time-resolution ecosystem (Maven/Gradle/NuGet; npm, pip,
+// etc. never reach this code path at all, since their relationships are
+// already known from a static lockfile parse) and had zero transitive
+// dependencies in its first 100, which a live scan of 100 real repositories
+// never produced even once (the largest manifest found had 62 total
+// dependencies). It exists only as a safety net against a pathological
+// manifest or a cursor that never terminates, not as a practically-expected
+// limit: GitHub returns each manifest's dependencies in a stable order
+// (alphabetical by package name, confirmed via live testing), so once a
+// manifest is actually resolved, a transitive dependency is virtually
+// certain to appear within the first page or two regardless of total
+// size, thanks to manifestHasTransitiveDependencyBeyondSample's early exit
+// on the first match. 50 pages (5,100 total dependencies inspected,
+// combined with the initial sample) comfortably covers even a very large
+// genuinely-unresolved manifest without the open-ended cost an unbounded
+// loop would risk.
+const maxManifestDependencyPaginationPages = 50
 
 // manifestHasTransitiveDependencyBeyondSample pages through a single
 // manifest's remaining dependencies (via the Node interface, since

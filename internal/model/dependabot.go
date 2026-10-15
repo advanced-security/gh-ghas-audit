@@ -319,6 +319,16 @@ type VersionUpdatesDetail struct {
 	ConfigPath     string   `json:"config_path,omitempty"`
 	Ecosystems     []string `json:"ecosystems,omitempty"`
 	TargetBranches []string `json:"target_branches,omitempty"`
+	// EcosystemLimits sums each configured update block's effective
+	// open-pull-requests-limit (GitHub's documented default of 5 when a
+	// block does not set one explicitly) per package-ecosystem value. This
+	// is an approximation, not an exact per-block accounting: multiple
+	// blocks for the same ecosystem (for example two separate npm
+	// directories) have their limits summed here, but an open pull request
+	// is not individually attributed back to the specific block that opened
+	// it, so a saturated block can still be masked by headroom in a
+	// different, unsaturated block for the same ecosystem.
+	EcosystemLimits map[string]int `json:"ecosystem_limits,omitempty"`
 	// UncoveredEcosystems lists ecosystems configured for version updates
 	// that the dependency graph / Dependabot alerts do not track at all
 	// (for example docker, terraform, helm). Version updates still run for

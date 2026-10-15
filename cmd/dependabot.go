@@ -130,6 +130,9 @@ func (opts *dependabotOptions) run(cmd *cobra.Command, _ []string) error {
 	if format == output.FormatLanguageCSV {
 		return fmt.Errorf("--format language-csv is not supported by the dependabot command")
 	}
+	if opts.scope.securityConfiguration != "" {
+		return fmt.Errorf("--security-configuration is not supported by the dependabot command")
+	}
 
 	statusFilter, err := parseSeverities(opts.statusFilter, "--status")
 	if err != nil {

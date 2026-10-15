@@ -189,8 +189,21 @@ type pullRequest struct {
 }
 
 // combinedStatus mirrors GET /repos/{owner}/{repo}/commits/{ref}/status.
+// This only reflects statuses posted through the (legacy) Statuses API; it
+// does not reflect Checks API results, which is what GitHub Actions (and
+// most modern third-party CI) actually posts. See checkRunsResponse, which
+// must also be consulted to detect an Actions-based CI failure.
 type combinedStatus struct {
 	State string `json:"state"`
+}
+
+// checkRunsResponse mirrors GET
+// /repos/{owner}/{repo}/commits/{ref}/check-runs.
+type checkRunsResponse struct {
+	CheckRuns []struct {
+		Status     string `json:"status"`
+		Conclusion string `json:"conclusion"`
+	} `json:"check_runs"`
 }
 
 // branchRules mirrors GET /repos/{owner}/{repo}/rules/branches/{branch}: the
@@ -205,6 +218,20 @@ type branchRule struct {
 			Context string `json:"context"`
 		} `json:"required_status_checks"`
 	} `json:"parameters"`
+}
+
+// classicRequiredStatusChecks mirrors GET
+// /repos/{owner}/{repo}/branches/{branch}/protection/required_status_checks,
+// the older, separate branch-protection system that predates rulesets.
+// GET /repos/{owner}/{repo}/rules/branches/{branch} (branchRule above) only
+// returns rules from the newer Rulesets feature; a repository enforcing a
+// required status check purely through classic branch protection is
+// invisible to that endpoint, so this one must also be checked.
+type classicRequiredStatusChecks struct {
+	Contexts []string `json:"contexts"`
+	Checks   []struct {
+		Context string `json:"context"`
+	} `json:"checks"`
 }
 
 // dependabotSecretList mirrors GET /orgs/{org}/dependabot/secrets and

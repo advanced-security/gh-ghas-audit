@@ -38,10 +38,31 @@ const defaultDependencyReviewCheckPattern = "dependency review"
 // marketplace repository slug, or a stable name for a non-Action mechanism),
 // independent of how it happens to be pinned or referenced in a given
 // workflow file; Marker is the literal, lowercased substring searched for in
-// workflow file content.
+// workflow file content. Ecosystems lists the manifestEcosystem values this
+// detector can actually resolve a transitive-dependency gap for (for
+// example "maven" or "gradle"); a nil/empty Ecosystems means the detector is
+// a generic, build-tool-agnostic submitter (a full SBOM export, Component
+// Detection, or the raw dependency submission API) that mitigates a gap in
+// any ecosystem it runs against.
 type autoSubmissionDetector struct {
-	ID     string
-	Marker string
+	ID         string
+	Marker     string
+	Ecosystems []string
+}
+
+// coversEcosystem reports whether d can mitigate a transitive-dependency gap
+// for the given manifestEcosystem value. A detector with no Ecosystems is
+// generic and covers every ecosystem.
+func (d autoSubmissionDetector) coversEcosystem(ecosystem string) bool {
+	if len(d.Ecosystems) == 0 {
+		return true
+	}
+	for _, e := range d.Ecosystems {
+		if strings.EqualFold(e, ecosystem) {
+			return true
+		}
+	}
+	return false
 }
 
 // knownAutoSubmissionDetectors enumerates the build-time dependency
@@ -55,31 +76,67 @@ type autoSubmissionDetector struct {
 // particular workflow pins. A match is treated as evidence that a
 // build-time-resolution manifest gap (Maven, Gradle, NuGet, Go, Mill, Mix,
 // Scala/sbt, Erlang/rebar3) is already being mitigated, or already explains
-// why coverage is complete. Matching is deliberately a broad, best-effort
-// substring search rather than an exact action-version match, because
-// pinned refs and forks are common; every marker here has been confirmed
-// against real-world workflow files via GitHub code search.
+// why coverage is complete, but only for the ecosystem(s) that detector
+// actually resolves (see autoSubmissionDetector.Ecosystems /
+// coversEcosystem) — a Go submission action, for example, says nothing
+// about an unrelated NuGet manifest gap. Matching is deliberately a broad,
+// best-effort substring search rather than an exact action-version match,
+// because pinned refs and forks are common; every marker here has been
+// confirmed against real-world workflow files via GitHub code search.
+//
+// gradle/actions/setup-gradle and gradle/gradle-build-action are
+// deliberately NOT included here: both actions' dependency-graph submission
+// behavior defaults to disabled (opt-in via an explicit
+// dependency-graph: generate-and-submit input), so a bare reference to
+// either action in a workflow is not reliable evidence that submission is
+// actually happening. Only gradle/actions/dependency-submission, whose sole
+// purpose is submission, is a dependable signal.
 var knownAutoSubmissionDetectors = []autoSubmissionDetector{
-	{ID: "advanced-security/maven-dependency-submission-action", Marker: "advanced-security/maven-dependency-submission-action"},
-	{ID: "gradle/actions/dependency-submission", Marker: "gradle/actions/dependency-submission"},
-	{ID: "gradle/actions/setup-gradle", Marker: "gradle/actions/setup-gradle"},
-	{ID: "gradle/gradle-build-action", Marker: "gradle/gradle-build-action"},
+	{ID: "advanced-security/maven-dependency-submission-action", Marker: "advanced-security/maven-dependency-submission-action", Ecosystems: []string{"maven"}},
+	{ID: "gradle/actions/dependency-submission", Marker: "gradle/actions/dependency-submission", Ecosystems: []string{"gradle"}},
 	{ID: "advanced-security/component-detection-dependency-submission-action", Marker: "advanced-security/component-detection-dependency-submission-action"},
-	{ID: "actions/go-dependency-submission", Marker: "actions/go-dependency-submission"},
-	{ID: "ckipp01/mill-dependency-submission", Marker: "ckipp01/mill-dependency-submission"},
-	{ID: "erlef/mix-dependency-submission", Marker: "erlef/mix-dependency-submission"},
-	{ID: "erlef/rebar3-dependency-submission", Marker: "erlef/rebar3-dependency-submission"},
-	{ID: "scalacenter/sbt-dependency-submission", Marker: "scalacenter/sbt-dependency-submission"},
+	{ID: "actions/go-dependency-submission", Marker: "actions/go-dependency-submission", Ecosystems: []string{"go"}},
+	{ID: "ckipp01/mill-dependency-submission", Marker: "ckipp01/mill-dependency-submission", Ecosystems: []string{"mill"}},
+	{ID: "erlef/mix-dependency-submission", Marker: "erlef/mix-dependency-submission", Ecosystems: []string{"mix"}},
+	{ID: "erlef/rebar3-dependency-submission", Marker: "erlef/rebar3-dependency-submission", Ecosystems: []string{"rebar3"}},
+	{ID: "scalacenter/sbt-dependency-submission", Marker: "scalacenter/sbt-dependency-submission", Ecosystems: []string{"sbt"}},
 	{ID: "advanced-security/spdx-dependency-submission-action", Marker: "advanced-security/spdx-dependency-submission-action"},
 	{ID: "advanced-security/codeql-dependency-graph-action", Marker: "advanced-security/codeql-dependency-graph-action"},
 	{ID: "anchore/sbom-action", Marker: "anchore/sbom-action"},
-	{ID: "pippinmole/bun-dependency-submission", Marker: "pippinmole/bun-dependency-submission"},
+	{ID: "pippinmole/bun-dependency-submission", Marker: "pippinmole/bun-dependency-submission", Ecosystems: []string{"bun"}},
 	// Generic markers, kept last: a broad "*-dependency-submission-action"
 	// or "actions/dependency-submission" reference not covered by a specific
 	// entry above (a fork, a rename, or a submitter this list has not been
 	// updated for yet).
 	{ID: "actions/dependency-submission", Marker: "actions/dependency-submission"},
 	{ID: "dependency-submission-action", Marker: "dependency-submission-action"},
+}
+
+// isGenericAutoSubmissionMarker reports whether marker is one of the two
+// deliberately broad, catch-all fallback markers in
+// knownAutoSubmissionDetectors (as opposed to a specific action's own
+// marketplace slug).
+func isGenericAutoSubmissionMarker(marker string) bool {
+	return marker == "actions/dependency-submission" || marker == "dependency-submission-action"
+}
+
+// genericMarkerSubsumedBySpecificMatch reports whether a generic marker's
+// match in content is redundant: some other, more specific (non-generic)
+// detector's marker both contains the generic marker as a substring of its
+// own name and is itself present in content. This is true for every
+// specific "*-dependency-submission-action" slug and for
+// "gradle/actions/dependency-submission" (which contains the generic
+// "actions/dependency-submission" marker).
+func genericMarkerSubsumedBySpecificMatch(content, genericMarker string) bool {
+	for _, other := range knownAutoSubmissionDetectors {
+		if other.Marker == genericMarker || isGenericAutoSubmissionMarker(other.Marker) {
+			continue
+		}
+		if strings.Contains(other.Marker, genericMarker) && strings.Contains(content, other.Marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // customDependencySubmissionMarker is the dependency submission API's REST
@@ -667,8 +724,10 @@ func (c *DependabotCollector) collectRepository(ctx context.Context, org string,
 	if c.options.Depth == DepthConfig {
 		repo.Status.DependencyGraph = model.FeatureNotEvaluated
 		repo.Status.DependencyGraphCoverage = model.GraphCoverageNotEvaluated
+		repo.Status.DependabotAlerts = model.FeatureNotEvaluated
 		repo.Status.PullRequestHealth = model.PRHealthNotEvaluated
 		repo.Status.DependencyReview = model.DependencyReviewNotEvaluated
+		repo.Status.Incomplete = len(repo.Errors) > 0
 		model.ClassifyDependabot(&repo.Status)
 		return repo
 	}
@@ -694,6 +753,13 @@ func (c *DependabotCollector) collectRepository(ctx context.Context, org string,
 	} else {
 		repo.Status.DependencyReview = model.DependencyReviewNotEvaluated
 	}
+
+	// A collection failure recorded anywhere above (dependency graph,
+	// alerts, pull requests, dependency review, and so on) must prevent a
+	// confident healthy verdict: without this, dependabotClassify's
+	// Incomplete safety net never engages, since nothing else in this
+	// collector ever sets Status.Incomplete.
+	repo.Status.Incomplete = len(repo.Errors) > 0
 
 	model.ClassifyDependabot(&repo.Status)
 	return repo
@@ -800,9 +866,16 @@ func (c *DependabotCollector) collectVersionUpdates(ctx context.Context, org, na
 		sort.Strings(registries)
 		repo.VersionUpdates.RegistriesConfigured = registries
 
+		const defaultLimitPerBlock = 5
+		ecosystemLimits := map[string]int{}
 		for _, update := range parsed.Updates {
 			if update.PackageEcosystem != "" {
 				ecosystems[update.PackageEcosystem] = true
+				limit := defaultLimitPerBlock
+				if update.OpenPullRequestsLimit != nil {
+					limit = *update.OpenPullRequestsLimit
+				}
+				ecosystemLimits[update.PackageEcosystem] += limit
 			}
 			if update.TargetBranch != "" {
 				targetBranches[update.TargetBranch] = true
@@ -811,6 +884,9 @@ func (c *DependabotCollector) collectVersionUpdates(ctx context.Context, org, na
 		repo.VersionUpdates.Ecosystems = sortedKeys(ecosystems)
 		repo.VersionUpdates.TargetBranches = sortedKeys(targetBranches)
 		repo.VersionUpdates.UncoveredEcosystems = uncoveredEcosystems(repo.VersionUpdates.Ecosystems)
+		if len(ecosystemLimits) > 0 {
+			repo.VersionUpdates.EcosystemLimits = ecosystemLimits
+		}
 
 		repo.Status.VersionUpdates = model.VersionUpdatesConfigured
 		return
@@ -819,15 +895,21 @@ func (c *DependabotCollector) collectVersionUpdates(ctx context.Context, org, na
 	repo.Status.VersionUpdates = model.VersionUpdatesNotConfigured
 }
 
-// graphEcosystems are the dependency-graph/Dependabot-alerts-supported
-// ecosystem identifiers exposed by the GraphQL DependencyGraphEcosystem enum.
-// dependabot.yml's package-ecosystem values that are not in this set get
-// version updates but never dependency-graph or alert coverage.
+// graphEcosystems are the dependabot.yml package-ecosystem values that do
+// have dependency-graph/Dependabot-alert coverage. This is not the same set
+// as the GraphQL DependencyGraphEcosystem enum: Gradle dependencies are
+// tracked by the dependency graph, but under that enum's MAVEN value (there
+// is no distinct GRADLE entry in the dependency graph's own ecosystem
+// classification), while dependabot.yml's package-ecosystem: gradle is a
+// distinct, valid configuration value. Both must be listed here so a
+// gradle-configured update block is not misreported as having no
+// dependency-graph/alert coverage at all.
 var graphEcosystems = map[string]bool{
 	"github-actions": true,
 	"composer":       true,
 	"gomod":          true,
 	"maven":          true,
+	"gradle":         true,
 	"npm":            true,
 	"nuget":          true,
 	"pip":            true,
@@ -1006,6 +1088,7 @@ func (c *DependabotCollector) collectDependencyGraph(ctx context.Context, org, n
 	repo.DependencyGraph.Evaluated = true
 	repo.DependencyGraph.TotalManifests = total
 
+	const inspectedDependenciesPerManifest = 100
 	ecosystems := map[string]bool{}
 	var unparseable, oversized, missingTransitive []string
 	for _, node := range nodes {
@@ -1026,15 +1109,43 @@ func (c *DependabotCollector) collectDependencyGraph(ctx context.Context, org, n
 					break
 				}
 			}
-			if !hasTransitive {
-				missingTransitive = append(missingTransitive, node.Filename)
+			if hasTransitive {
+				continue
 			}
+			if node.DependenciesCount > len(node.Dependencies.Nodes) && len(node.Dependencies.Nodes) >= inspectedDependenciesPerManifest {
+				// Only the first inspectedDependenciesPerManifest
+				// dependencies were inspected (the GraphQL query above caps
+				// this per manifest), and none of them were transitive, but
+				// the manifest has more dependencies than were inspected. A
+				// transitive relationship could still appear beyond the
+				// inspected sample; reporting a confirmed gap here would be
+				// a false positive for an actually-resolved manifest with a
+				// large, direct-dependency-heavy dependency list. This is
+				// recorded as a collection note so the ambiguity is visible
+				// rather than silently asserting a gap.
+				repo.Errors = append(repo.Errors, fmt.Sprintf(
+					"dependency graph manifests: %s has %d dependencies, only the first %d could be inspected; "+
+						"transitive coverage for this manifest is unknown, not confirmed missing",
+					node.Filename, node.DependenciesCount, len(node.Dependencies.Nodes)))
+				continue
+			}
+			missingTransitive = append(missingTransitive, node.Filename)
 		}
 	}
 	repo.DependencyGraph.Ecosystems = sortedKeys(ecosystems)
 	repo.DependencyGraph.UnparseableManifests = unparseable
 	repo.DependencyGraph.OversizedManifests = oversized
 	repo.DependencyGraph.ManifestsMissingTransitive = missingTransitive
+	if len(unparseable) > 0 {
+		repo.Errors = append(repo.Errors, fmt.Sprintf(
+			"dependency graph manifests: %d manifest(s) could not be parsed and contribute no dependency evidence: %s",
+			len(unparseable), strings.Join(unparseable, ", ")))
+	}
+	if len(oversized) > 0 {
+		repo.Errors = append(repo.Errors, fmt.Sprintf(
+			"dependency graph manifests: %d manifest(s) exceeded the graph's maximum size and were only partially processed: %s",
+			len(oversized), strings.Join(oversized, ", ")))
+	}
 
 	// The dependency graph has no simple per-repository "enabled" boolean.
 	// Manifest evidence, even zero manifests, means the query executed
@@ -1056,13 +1167,17 @@ func (c *DependabotCollector) collectDependencyGraph(ctx context.Context, org, n
 
 	switch {
 	case len(missingTransitive) > 0:
-		// A gap was found. Check whether a known dependency-submission
-		// workflow already mitigates it before flagging the repository as
-		// degraded.
-		detected, action := c.detectAutoSubmission(ctx, org, name)
-		repo.DependencyGraph.AutoSubmissionDetected = detected
-		repo.DependencyGraph.AutoSubmissionAction = action
-		if detected {
+		// A gap was found. Check whether known dependency-submission
+		// workflows already mitigate it before flagging the repository as
+		// degraded. Mitigation is ecosystem-scoped: a detected Go submission
+		// action, for example, must not be treated as closing an unrelated
+		// NuGet manifest gap. Coverage is only "mitigated" when every
+		// ecosystem among the missing-transitive manifests is covered by at
+		// least one matched detector.
+		matches := c.detectAutoSubmission(ctx, org, name)
+		repo.DependencyGraph.AutoSubmissionDetected = len(matches) > 0
+		repo.DependencyGraph.AutoSubmissionAction = joinDetectorIDs(matches)
+		if allEcosystemsCovered(missingTransitive, matches) {
 			repo.Status.DependencyGraphCoverage = model.GraphCoverageMitigated
 		} else {
 			repo.Status.DependencyGraphCoverage = model.GraphCoveragePartial
@@ -1075,7 +1190,9 @@ func (c *DependabotCollector) collectDependencyGraph(ctx context.Context, org, n
 		// than staying blank simply because there was no gap left to
 		// mitigate. This is the common case for a repository that already
 		// has an auto-submission workflow configured and working.
-		detected, action := c.detectAutoSubmission(ctx, org, name)
+		matches := c.detectAutoSubmission(ctx, org, name)
+		detected := len(matches) > 0
+		action := joinDetectorIDs(matches)
 		if !detected {
 			// A workflow file is not the only way coverage gets fixed:
 			// GitHub's native "Automatic Dependency Submission" toggle (no
@@ -1097,24 +1214,68 @@ func (c *DependabotCollector) collectDependencyGraph(ctx context.Context, org, n
 	}
 }
 
-// detectAutoSubmission scans the repository's Actions workflow files for a
-// known build-time dependency submission action or step. This is best effort:
-// it is only run once a Maven/Gradle/NuGet/etc. direct-only manifest gap has
-// already been found, which keeps the extra API calls proportional to the
-// problem. A known Action (see knownAutoSubmissionDetectors) always takes
-// priority; a bare reference to the dependency submission API's REST
-// endpoint, with no recognized Action alongside it, is reported distinctly
-// as a custom submitter (see customAutoSubmissionActionID).
-func (c *DependabotCollector) detectAutoSubmission(ctx context.Context, org, name string) (bool, string) {
+// joinDetectorIDs renders the IDs of matched detectors for display in
+// AutoSubmissionAction, joining multiple matches so none are silently
+// dropped.
+func joinDetectorIDs(matches []autoSubmissionDetector) string {
+	if len(matches) == 0 {
+		return ""
+	}
+	ids := make([]string, len(matches))
+	for i, m := range matches {
+		ids[i] = m.ID
+	}
+	return strings.Join(ids, ", ")
+}
+
+// allEcosystemsCovered reports whether every manifest filename in
+// missingTransitive has its manifestEcosystem covered by at least one of the
+// matched detectors (either an ecosystem-specific match, or any generic,
+// ecosystem-agnostic match).
+func allEcosystemsCovered(missingTransitive []string, matches []autoSubmissionDetector) bool {
+	if len(matches) == 0 {
+		return false
+	}
+	for _, filename := range missingTransitive {
+		ecosystem := manifestEcosystem(filename)
+		covered := false
+		for _, m := range matches {
+			if m.coversEcosystem(ecosystem) {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			return false
+		}
+	}
+	return true
+}
+
+// detectAutoSubmission scans the repository's Actions workflow files for
+// known build-time dependency submission actions or steps. This is best
+// effort: it is only run once a Maven/Gradle/NuGet/etc. direct-only manifest
+// gap has already been found, which keeps the extra API calls proportional
+// to the problem. It returns every knownAutoSubmissionDetectors entry that
+// matched (deduplicated by ID, not just the first one found), so the caller
+// can confirm ecosystem-scoped coverage rather than assuming one match
+// mitigates every gap; a bare reference to the dependency submission API's
+// REST endpoint, with no recognized Action alongside it, is reported
+// distinctly as a custom submitter (see customAutoSubmissionActionID).
+// Comment-only lines (trimmed content starting with "#") are stripped
+// before matching, so a marker referenced only inside a disabled,
+// commented-out workflow step is not mistaken for active mitigation.
+func (c *DependabotCollector) detectAutoSubmission(ctx context.Context, org, name string) []autoSubmissionDetector {
 	var entries []contentsEntry
 	listPath := fmt.Sprintf("repos/%s/%s/contents/.github/workflows", url.PathEscape(org), url.PathEscape(name))
 	if err := c.client.GetJSON(ctx, listPath, &entries); err != nil {
-		return false, ""
+		return nil
 	}
 
 	const maxWorkflowsInspected = 20
 	inspected := 0
 	foundCustom := false
+	matched := map[string]autoSubmissionDetector{}
 	for _, entry := range entries {
 		if entry.Type != "file" {
 			continue
@@ -1132,20 +1293,55 @@ func (c *DependabotCollector) detectAutoSubmission(ctx context.Context, org, nam
 		if err != nil {
 			continue
 		}
-		lowerContent := strings.ToLower(string(content))
+		lowerContent := strings.ToLower(stripYAMLCommentLines(string(content)))
 		for _, detector := range knownAutoSubmissionDetectors {
-			if strings.Contains(lowerContent, detector.Marker) {
-				return true, detector.ID
+			if !strings.Contains(lowerContent, detector.Marker) {
+				continue
 			}
+			if isGenericAutoSubmissionMarker(detector.Marker) && genericMarkerSubsumedBySpecificMatch(lowerContent, detector.Marker) {
+				// Several specific action slugs (for example
+				// "advanced-security/maven-dependency-submission-action" or
+				// "gradle/actions/dependency-submission") contain a generic
+				// marker like "dependency-submission-action" or
+				// "actions/dependency-submission" as a literal substring of
+				// their own name. The generic markers exist only to catch
+				// an unrecognized fork or rename; they must not also
+				// register as a second, ecosystem-agnostic "any" match
+				// alongside an already-identified specific action, which
+				// would let that specific action's real ecosystem scope be
+				// bypassed.
+				continue
+			}
+			matched[detector.ID] = detector
 		}
 		if strings.Contains(lowerContent, customDependencySubmissionMarker) {
 			foundCustom = true
 		}
 	}
-	if foundCustom {
-		return true, customAutoSubmissionActionID
+	var results []autoSubmissionDetector
+	for _, detector := range matched {
+		results = append(results, detector)
 	}
-	return false, ""
+	if foundCustom {
+		results = append(results, autoSubmissionDetector{ID: customAutoSubmissionActionID})
+	}
+	sort.Slice(results, func(i, j int) bool { return results[i].ID < results[j].ID })
+	return results
+}
+
+// stripYAMLCommentLines removes every line whose trimmed content begins with
+// "#" from content, so a marker referenced only in a disabled, commented-out
+// workflow step is not treated as live evidence of auto-submission.
+func stripYAMLCommentLines(content string) string {
+	lines := strings.Split(content, "\n")
+	kept := lines[:0]
+	for _, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), "#") {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	return strings.Join(kept, "\n")
 }
 
 // sbomBaselineCreators are the tool entries GitHub's SBOM export always
@@ -1212,8 +1408,10 @@ func (c *DependabotCollector) collectAlerts(ctx context.Context, org, name strin
 
 	var alerts []dependabotAlert
 	const maxPages = 3
+	const perPage = 100
 	pages := 0
-	listPath := fmt.Sprintf("repos/%s/%s/dependabot/alerts?state=open&per_page=100", url.PathEscape(org), url.PathEscape(name))
+	lastBatchSize := 0
+	listPath := fmt.Sprintf("repos/%s/%s/dependabot/alerts?state=open&per_page=%d", url.PathEscape(org), url.PathEscape(name), perPage)
 	err := c.client.GetPaginatedJSON(ctx, listPath, func(page []byte) error {
 		pages++
 		var batch []dependabotAlert
@@ -1221,6 +1419,7 @@ func (c *DependabotCollector) collectAlerts(ctx context.Context, org, name strin
 			return err
 		}
 		alerts = append(alerts, batch...)
+		lastBatchSize = len(batch)
 		if pages >= maxPages {
 			return errStopPagination
 		}
@@ -1229,6 +1428,17 @@ func (c *DependabotCollector) collectAlerts(ctx context.Context, org, name strin
 	if err != nil && !errors.Is(err, errStopPagination) {
 		repo.Errors = append(repo.Errors, fmt.Sprintf("dependabot alerts: %v", err))
 		return
+	}
+	// A full last page (exactly perPage items) means there may be more
+	// alerts beyond the page budget; a short page means that was genuinely
+	// the last one. Without this check, hitting the budget would always be
+	// treated as a clean, complete result, silently truncating totals,
+	// severity/malware counts and the oldest-alert age for any repository
+	// with more open alerts than the budget covers.
+	if errors.Is(err, errStopPagination) && lastBatchSize == perPage {
+		repo.Errors = append(repo.Errors, fmt.Sprintf(
+			"dependabot alerts: stopped after %d pages (%d alerts) with more open alerts likely remaining",
+			pages, len(alerts)))
 	}
 
 	repo.Alerts.Evaluated = true
@@ -1380,6 +1590,19 @@ func (c *DependabotCollector) collectSecurityUpdatePullRequestNumbers(ctx contex
 			}
 		}
 		if !response.Repository.VulnerabilityAlerts.PageInfo.HasNextPage {
+			return evidence
+		}
+		if page == maxAlertPages-1 {
+			// The page budget was exhausted while the server still reports
+			// more alerts remaining. The linkage map built so far is
+			// genuinely partial: a security pull request linked only from
+			// an omitted alert would otherwise be silently counted as a
+			// version update (and could even look like a false backlog).
+			// Report this as a collection error so it cannot be mistaken
+			// for complete, confident evidence.
+			repo.Errors = append(repo.Errors, fmt.Sprintf(
+				"vulnerability alert pull request linkage: stopped after %d pages with more alerts remaining; "+
+					"pull request security/version classification may be incomplete", maxAlertPages))
 			break
 		}
 		cursor = response.Repository.VulnerabilityAlerts.PageInfo.EndCursor
@@ -1443,14 +1666,22 @@ func isPackageTokenByte(b byte) bool {
 }
 
 // collectPullRequests reads open Dependabot pull requests, their combined
-// status, and whether Dependabot activity is paused for inactivity.
-// authoritativePaused is the result of collectAutomatedSecurityFixes: when
-// non-nil, it is trusted over the best-effort "dependabot-paused" pull
-// request label, since the label is only a proxy that can lag the real
-// state and cannot be observed at all when there are zero open pull
-// requests. When nil (the authoritative check was unavailable), the label
-// remains the fallback signal.
+// status and check-run conclusions, and whether Dependabot activity is
+// paused for inactivity. authoritativePaused is the result of
+// collectAutomatedSecurityFixes: when non-nil, it is trusted over the
+// best-effort "dependabot-paused" pull request label, since the label is
+// only a proxy that can lag the real state and cannot be observed at all
+// when there are zero open pull requests. When nil (the authoritative check
+// was unavailable), the label remains the fallback signal.
 func (c *DependabotCollector) collectPullRequests(ctx context.Context, org, name string, repo *model.DependabotRepo, authoritativePaused *bool) {
+	// Recorded immediately, before any early return below, so a repository
+	// confirmed paused by the authoritative check is never reported as not
+	// paused merely because it happens to have zero open pull requests or
+	// because the pull request list itself could not be fetched.
+	if authoritativePaused != nil {
+		repo.PullRequests.PausedForInactivity = *authoritativePaused
+	}
+
 	var pulls []pullRequest
 	listPath := fmt.Sprintf("repos/%s/%s/pulls?state=open&per_page=100", url.PathEscape(org), url.PathEscape(name))
 	if err := c.client.GetPaginatedJSON(ctx, listPath, func(page []byte) error {
@@ -1483,10 +1714,16 @@ func (c *DependabotCollector) collectPullRequests(ctx context.Context, org, name
 
 	evidence := c.collectSecurityUpdatePullRequestNumbers(ctx, org, name, repo)
 
-	paused := false
+	paused := repo.PullRequests.PausedForInactivity
 	var oldest *time.Time
 	const maxStatusChecks = 25
 	checked := 0
+	// uncheckedPulls counts pull requests whose failing-check status could
+	// not be established, either because the per-scan check budget was
+	// exhausted or because a status/check-run request failed. These must
+	// not be silently folded into a confident "healthy" verdict: see the
+	// switch below.
+	uncheckedPulls := 0
 	for _, pr := range dependabotPulls {
 		isSecurity := false
 		if evidence != nil {
@@ -1502,22 +1739,30 @@ func (c *DependabotCollector) collectPullRequests(ctx context.Context, org, name
 		if pr.CreatedAt != nil && (oldest == nil || pr.CreatedAt.Before(*oldest)) {
 			oldest = pr.CreatedAt
 		}
-		for _, label := range pr.Labels {
-			if strings.EqualFold(label.Name, "dependabot-paused") {
-				paused = true
+		if authoritativePaused == nil {
+			for _, label := range pr.Labels {
+				if strings.EqualFold(label.Name, "dependabot-paused") {
+					paused = true
+				}
 			}
 		}
 
-		if checked >= maxStatusChecks || pr.Head.SHA == "" {
+		if pr.Head.SHA == "" {
+			uncheckedPulls++
+			continue
+		}
+		if checked >= maxStatusChecks {
+			uncheckedPulls++
 			continue
 		}
 		checked++
-		var status combinedStatus
-		statusPath := fmt.Sprintf("repos/%s/%s/commits/%s/status", url.PathEscape(org), url.PathEscape(name), pr.Head.SHA)
-		if err := c.client.GetJSON(ctx, statusPath, &status); err != nil {
+
+		failing, err := c.pullRequestHasFailingChecks(ctx, org, name, pr.Head.SHA)
+		if err != nil {
+			uncheckedPulls++
 			continue
 		}
-		if strings.EqualFold(status.State, "failure") || strings.EqualFold(status.State, "error") {
+		if failing {
 			repo.PullRequests.OpenFailingChecks++
 		}
 	}
@@ -1527,16 +1772,27 @@ func (c *DependabotCollector) collectPullRequests(ctx context.Context, org, name
 		days := int(time.Since(*oldest).Hours() / 24)
 		repo.PullRequests.OldestOpenDays = &days
 	}
-	if authoritativePaused != nil {
-		paused = *authoritativePaused
+	if authoritativePaused == nil {
+		repo.PullRequests.PausedForInactivity = paused
 	}
-	repo.PullRequests.PausedForInactivity = paused
+
+	if uncheckedPulls > 0 {
+		repo.Errors = append(repo.Errors, fmt.Sprintf(
+			"pull request checks: %d of %d open Dependabot pull requests could not be checked for failing checks",
+			uncheckedPulls, len(dependabotPulls)))
+	}
 
 	openPRLimit := versionUpdatesLimit(repo)
 
 	switch {
 	case repo.PullRequests.OpenFailingChecks > 0:
 		repo.Status.PullRequestHealth = model.PRHealthFailingChecks
+	case uncheckedPulls > 0:
+		// Nothing confirmed failing among the pull requests that were
+		// checked, but at least one pull request's status could not be
+		// established at all; reporting healthy here would claim
+		// certainty the collector does not have.
+		repo.Status.PullRequestHealth = model.PRHealthUnknown
 	case paused:
 		repo.Status.VersionUpdates = model.VersionUpdatesPausedInactivity
 		repo.Status.PullRequestHealth = model.PRHealthHealthy
@@ -1547,17 +1803,76 @@ func (c *DependabotCollector) collectPullRequests(ctx context.Context, org, name
 	}
 }
 
+// failingCheckRunConclusions are the check-run conclusions this collector
+// treats as a definite failure. "skipped", "neutral" and "stale" are
+// deliberately excluded: they are ordinary, often intentional outcomes (for
+// example a path-filtered workflow that never ran for this PR), not
+// evidence of a problem.
+var failingCheckRunConclusions = map[string]bool{
+	"failure":         true,
+	"timed_out":       true,
+	"cancelled":       true,
+	"action_required": true,
+}
+
+// pullRequestHasFailingChecks reports whether a commit has a failing result
+// from either of GitHub's two independent check systems. The legacy
+// Combined Status endpoint only reflects statuses posted through the
+// Statuses API; it does not reflect Checks API results, which is what
+// GitHub Actions (and most modern third-party CI) actually posts. Relying
+// on the combined status alone therefore misses virtually all
+// Actions-based CI failures. Both are queried and either reporting a
+// failure is treated as the pull request having a failing check.
+func (c *DependabotCollector) pullRequestHasFailingChecks(ctx context.Context, org, name, sha string) (bool, error) {
+	var status combinedStatus
+	statusPath := fmt.Sprintf("repos/%s/%s/commits/%s/status", url.PathEscape(org), url.PathEscape(name), sha)
+	if err := c.client.GetJSON(ctx, statusPath, &status); err != nil {
+		return false, err
+	}
+	if strings.EqualFold(status.State, "failure") || strings.EqualFold(status.State, "error") {
+		return true, nil
+	}
+
+	var checkRuns checkRunsResponse
+	checkRunsPath := fmt.Sprintf("repos/%s/%s/commits/%s/check-runs?per_page=100", url.PathEscape(org), url.PathEscape(name), sha)
+	if err := c.client.GetJSON(ctx, checkRunsPath, &checkRuns); err != nil {
+		return false, err
+	}
+	for _, run := range checkRuns.CheckRuns {
+		if !strings.EqualFold(run.Status, "completed") {
+			continue
+		}
+		if failingCheckRunConclusions[strings.ToLower(run.Conclusion)] {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // versionUpdatesLimit returns the effective open-pull-requests-limit for
 // version updates. dependabot.yml is not re-parsed here; the collector keeps
 // the raw update blocks only long enough to compute this, via the ecosystem
 // list already recorded, defaulting to GitHub's documented default of 5 per
 // update block when unset.
+//
+// This is a repository-wide, per-ecosystem approximation, not a per-block
+// one: multiple update blocks for the same ecosystem (for example two
+// separate npm directories) have their limits summed, but open version
+// update pull requests are not individually attributed back to the specific
+// block that opened them (Dependabot's pull request payloads do not
+// directly expose which configured block a pull request came from). A
+// saturated block can therefore still be masked by headroom in a different,
+// unsaturated block for the same ecosystem; see model.VersionUpdatesDetail
+// for the per-block limits this is computed from.
 func versionUpdatesLimit(repo *model.DependabotRepo) int {
-	if len(repo.VersionUpdates.Ecosystems) == 0 {
+	if len(repo.VersionUpdates.EcosystemLimits) == 0 {
 		return 0
 	}
-	const defaultLimitPerBlock = 5
-	return defaultLimitPerBlock * len(repo.VersionUpdates.Ecosystems)
+	total := 0
+	for _, limit := range repo.VersionUpdates.EcosystemLimits {
+		total += limit
+	}
+	return total
 }
 
 // collectDependencyReview checks the repository default branch's effective
@@ -1601,6 +1916,41 @@ func (c *DependabotCollector) collectDependencyReview(ctx context.Context, org, 
 			continue
 		}
 		for _, check := range rule.Parameters.RequiredStatusChecks {
+			if strings.Contains(strings.ToLower(check.Context), pattern) {
+				repo.DependencyReview.MatchedCheckContext = check.Context
+				repo.Status.DependencyReview = model.DependencyReviewEnforced
+				return
+			}
+		}
+	}
+
+	// Rulesets are not the only way a required status check gets enforced:
+	// the older, separate classic branch-protection system
+	// (required_status_checks) is invisible to the rules/branches endpoint
+	// above. A repository relying solely on classic protection for its
+	// dependency-review check would otherwise always be misreported as
+	// not-enforced.
+	var classic classicRequiredStatusChecks
+	classicPath := fmt.Sprintf("repos/%s/%s/branches/%s/protection/required_status_checks", url.PathEscape(org), url.PathEscape(name), url.PathEscape(repo.DefaultBranch))
+	if err := c.client.GetJSON(ctx, classicPath, &classic); err != nil {
+		if !isNotFoundError(err) {
+			// A 404 here just means no classic protection is configured,
+			// which is a normal, non-error outcome (rulesets may still
+			// cover the branch). Anything else is a genuine collection
+			// failure that leaves enforcement unconfirmed.
+			repo.Errors = append(repo.Errors, fmt.Sprintf("classic branch protection: %v", err))
+			repo.Status.DependencyReview = model.DependencyReviewUnknown
+			return
+		}
+	} else {
+		for _, context := range classic.Contexts {
+			if strings.Contains(strings.ToLower(context), pattern) {
+				repo.DependencyReview.MatchedCheckContext = context
+				repo.Status.DependencyReview = model.DependencyReviewEnforced
+				return
+			}
+		}
+		for _, check := range classic.Checks {
 			if strings.Contains(strings.ToLower(check.Context), pattern) {
 				repo.DependencyReview.MatchedCheckContext = check.Context
 				repo.Status.DependencyReview = model.DependencyReviewEnforced

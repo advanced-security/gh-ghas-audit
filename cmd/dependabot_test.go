@@ -73,6 +73,23 @@ func TestDependabotCommandRejectsLanguageCSVFormat(t *testing.T) {
 	}
 }
 
+// TestDependabotCommandRejectsSecurityConfiguration verifies that
+// --security-configuration, which code-scanning supports to scope a scan to
+// a single security configuration, is explicitly rejected for dependabot
+// rather than silently ignored. The dependabot collector has no filtering
+// mechanism for it at all (unlike --format language-csv, which is rejected
+// for the same "not supported, so fail loudly" reason), so accepting the
+// flag without effect would silently produce an unscoped, misleading scan.
+func TestDependabotCommandRejectsSecurityConfiguration(t *testing.T) {
+	root := newRootCommand()
+	root.SetOut(&bytes.Buffer{})
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{"dependabot", "-o", "acme", "--security-configuration", "default"})
+	if err := root.Execute(); err == nil || !strings.Contains(err.Error(), "--security-configuration is not supported") {
+		t.Fatalf("--security-configuration should be rejected for dependabot, got %v", err)
+	}
+}
+
 func TestDependabotCommandRejectsInvalidConcurrency(t *testing.T) {
 	root := newRootCommand()
 	root.SetOut(&bytes.Buffer{})

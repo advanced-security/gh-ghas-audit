@@ -40,6 +40,13 @@ type dependabotFakeClient struct {
 	// AUTO_DISMISSED alert node with no live pull request link.
 	securityUpdateStalePackages map[string]bool
 
+	// paginatedOverrides lets a test take full control of GetPaginatedJSON
+	// for a given path prefix, so it can simulate multiple pages (calling
+	// collect more than once) instead of the default single-call behavior
+	// lookup-based responses give. Used for exercising pagination-cap
+	// truncation.
+	paginatedOverrides map[string]func(collect func([]byte) error) error
+
 	mu     sync.Mutex
 	warned map[string]bool
 }
@@ -50,7 +57,15 @@ func newDependabotFakeClient() *dependabotFakeClient {
 		warned:                      map[string]bool{},
 		securityUpdatePRNumbers:     map[int]bool{},
 		securityUpdateStalePackages: map[string]bool{},
+		paginatedOverrides:          map[string]func(collect func([]byte) error) error{},
 	}
+}
+
+// setPaginated registers a GetPaginatedJSON override for any request whose
+// path starts with prefix, giving a test full control over how many times
+// collect is invoked (simulating multiple pages).
+func (f *dependabotFakeClient) setPaginated(prefix string, fn func(collect func([]byte) error) error) {
+	f.paginatedOverrides[prefix] = fn
 }
 
 func (f *dependabotFakeClient) Host() string        { return "github.com" }
@@ -104,6 +119,11 @@ func (f *dependabotFakeClient) GetJSON(_ context.Context, path string, out any) 
 }
 
 func (f *dependabotFakeClient) GetPaginatedJSON(_ context.Context, path string, collect func([]byte) error) error {
+	for prefix, fn := range f.paginatedOverrides {
+		if strings.HasPrefix(path, prefix) {
+			return fn(collect)
+		}
+	}
 	value, ok := f.lookup(path)
 	if !ok {
 		return &ghapi.StatusError{StatusCode: http.StatusNotFound, URL: path, Message: "Not Found"}
@@ -1206,5 +1226,510 @@ func TestDependabotCollectRequiresScope(t *testing.T) {
 	_, err := NewDependabotCollector(client, DependabotOptions{Concurrency: 1}).Collect(context.Background(), "test")
 	if err == nil || !strings.Contains(err.Error(), "no organizations to scan") {
 		t.Fatalf("expected a scope error, got %v", err)
+	}
+}
+
+// TestDependabotCollectUncheckedPullRequestNeverReportsHealthy is the core
+// regression test for the most impactful fix in this batch: repo.Errors
+// accumulating evidence-collection failures must always set
+// Status.Incomplete, which must in turn prevent a healthy verdict.
+// Previously, Incomplete was never set anywhere in this collector, so a
+// repository whose pull request check status could not be established (the
+// combined-status call succeeds, but the check-runs call fails) would
+// silently report healthy despite the gap in evidence.
+func TestDependabotCollectUncheckedPullRequestNeverReportsHealthy(t *testing.T) {
+	client := newDependabotFakeClient()
+	baseRepoResponses(t, client, nil)
+
+	createdAt := time.Now().Add(-1 * time.Hour)
+	pr := pullRequest{Number: 1, Body: "Bumps foo from 1.0.0 to 1.0.1", CreatedAt: &createdAt}
+	pr.User.Login = "dependabot[bot]"
+	pr.Head.SHA = "abc123"
+	client.set("repos/acme/repo/pulls", []pullRequest{pr})
+	client.set("repos/acme/repo/commits/abc123/status", combinedStatus{State: "success"})
+	// Deliberately registered as a 404 error (not simply omitted): the fake
+	// client's longest-prefix lookup would otherwise fall back to the
+	// broader "repos/acme/repo" repository fixture and decode it into an
+	// empty, error-free checkRunsResponse, masking the fetch failure this
+	// test exists to exercise.
+	client.set("repos/acme/repo/commits/abc123/check-runs", &ghapi.StatusError{StatusCode: http.StatusNotFound, URL: "check-runs", Message: "Not Found"})
+
+	options := DependabotOptions{Repository: "acme/repo", Concurrency: 1, Depth: DepthHealth}
+	report, err := NewDependabotCollector(client, options).Collect(context.Background(), "test")
+	if err != nil {
+		t.Fatalf("Collect returned an error: %v", err)
+	}
+	repo := report.Repositories[0]
+	if repo.Status.PullRequestHealth != model.PRHealthUnknown {
+		t.Fatalf("pull request health = %q, want unknown", repo.Status.PullRequestHealth)
+	}
+	if !repo.Status.Incomplete {
+		t.Fatal("Status.Incomplete = false, want true: a collection error was recorded in repo.Errors")
+	}
+	if repo.Status.Overall != model.SeverityUnknown {
+		t.Fatalf("overall = %q, want unknown: Incomplete must prevent a healthy verdict (reasons: %v, errors: %v)",
+			repo.Status.Overall, repo.Status.Reasons, repo.Errors)
+	}
+	if len(repo.Errors) == 0 {
+		t.Error("expected a recorded collection error for the unchecked pull request")
+	}
+}
+
+// TestDependabotCollectDetectsFailingChecksFromChecksAPIOnly verifies that a
+// failing GitHub Actions check run is detected even when the legacy
+// Combined Status endpoint reports success, since Actions posts through the
+// separate Checks API that endpoint never reflects.
+func TestDependabotCollectDetectsFailingChecksFromChecksAPIOnly(t *testing.T) {
+	client := newDependabotFakeClient()
+	baseRepoResponses(t, client, nil)
+
+	createdAt := time.Now().Add(-1 * time.Hour)
+	pr := pullRequest{Number: 1, Body: "Bumps foo from 1.0.0 to 1.0.1", CreatedAt: &createdAt}
+	pr.User.Login = "dependabot[bot]"
+	pr.Head.SHA = "abc123"
+	client.set("repos/acme/repo/pulls", []pullRequest{pr})
+	client.set("repos/acme/repo/commits/abc123/status", combinedStatus{State: "success"})
+	client.set("repos/acme/repo/commits/abc123/check-runs", checkRunsResponse{
+		CheckRuns: []struct {
+			Status     string `json:"status"`
+			Conclusion string `json:"conclusion"`
+		}{{Status: "completed", Conclusion: "failure"}},
+	})
+
+	options := DependabotOptions{Repository: "acme/repo", Concurrency: 1, Depth: DepthHealth}
+	report, err := NewDependabotCollector(client, options).Collect(context.Background(), "test")
+	if err != nil {
+		t.Fatalf("Collect returned an error: %v", err)
+	}
+	repo := report.Repositories[0]
+	if repo.PullRequests.OpenFailingChecks != 1 {
+		t.Fatalf("open failing checks = %d, want 1 (combined status alone would have missed this)", repo.PullRequests.OpenFailingChecks)
+	}
+	if repo.Status.PullRequestHealth != model.PRHealthFailingChecks {
+		t.Fatalf("pull request health = %q, want failing-checks", repo.Status.PullRequestHealth)
+	}
+	if repo.Status.Overall != model.SeverityFailing {
+		t.Fatalf("overall = %q, want failing (reasons: %v)", repo.Status.Overall, repo.Status.Reasons)
+	}
+}
+
+// TestDependabotCollectSkippedCheckRunsAreNotFailures verifies that
+// "skipped" and "neutral" check-run conclusions (ordinary, often
+// intentional outcomes, such as a path-filtered workflow that never ran for
+// this pull request) are not counted as failures.
+func TestDependabotCollectSkippedCheckRunsAreNotFailures(t *testing.T) {
+	client := newDependabotFakeClient()
+	baseRepoResponses(t, client, nil)
+
+	createdAt := time.Now().Add(-1 * time.Hour)
+	pr := pullRequest{Number: 1, Body: "Bumps foo from 1.0.0 to 1.0.1", CreatedAt: &createdAt}
+	pr.User.Login = "dependabot[bot]"
+	pr.Head.SHA = "abc123"
+	client.set("repos/acme/repo/pulls", []pullRequest{pr})
+	client.set("repos/acme/repo/commits/abc123/status", combinedStatus{State: "success"})
+	client.set("repos/acme/repo/commits/abc123/check-runs", checkRunsResponse{
+		CheckRuns: []struct {
+			Status     string `json:"status"`
+			Conclusion string `json:"conclusion"`
+		}{
+			{Status: "completed", Conclusion: "skipped"},
+			{Status: "completed", Conclusion: "neutral"},
+			{Status: "completed", Conclusion: "success"},
+		},
+	})
+
+	options := DependabotOptions{Repository: "acme/repo", Concurrency: 1, Depth: DepthHealth}
+	report, err := NewDependabotCollector(client, options).Collect(context.Background(), "test")
+	if err != nil {
+		t.Fatalf("Collect returned an error: %v", err)
+	}
+	repo := report.Repositories[0]
+	if repo.PullRequests.OpenFailingChecks != 0 {
+		t.Fatalf("open failing checks = %d, want 0 (skipped/neutral are not failures)", repo.PullRequests.OpenFailingChecks)
+	}
+	if repo.Status.PullRequestHealth != model.PRHealthHealthy {
+		t.Fatalf("pull request health = %q, want healthy", repo.Status.PullRequestHealth)
+	}
+}
+
+// TestDependabotCollectSumsPerEcosystemBacklogLimitsAcrossBlocks verifies the
+// fix for a dependabot.yml with two update blocks for the same ecosystem
+// (for example two separate npm directories): the effective backlog limit
+// must be the sum of each block's own open-pull-requests-limit, not
+// GitHub's default-per-block limit multiplied by the count of distinct
+// ecosystems (which collapses two same-ecosystem blocks into a single
+// limit-unit and reports a false backlog well before the real, combined
+// limit is reached).
+func TestDependabotCollectSumsPerEcosystemBacklogLimitsAcrossBlocks(t *testing.T) {
+	client := newDependabotFakeClient()
+	baseRepoResponses(t, client, nil)
+
+	dependabotYML := "version: 2\nupdates:\n" +
+		"  - package-ecosystem: npm\n    directory: \"/app\"\n    open-pull-requests-limit: 3\n" +
+		"  - package-ecosystem: npm\n    directory: \"/tools\"\n    open-pull-requests-limit: 5\n"
+	client.set("repos/acme/repo/contents/.github/dependabot.yml", map[string]any{
+		"type":    "file",
+		"name":    "dependabot.yml",
+		"path":    ".github/dependabot.yml",
+		"content": base64.StdEncoding.EncodeToString([]byte(dependabotYML)),
+	})
+
+	var pulls []pullRequest
+	for i := 1; i <= 7; i++ {
+		createdAt := time.Now().Add(-1 * time.Hour)
+		pr := pullRequest{Number: i, Body: fmt.Sprintf("Bumps pkg%d from 1.0.0 to 1.0.1", i), CreatedAt: &createdAt}
+		pr.User.Login = "dependabot[bot]"
+		pr.Head.SHA = fmt.Sprintf("sha%d", i)
+		client.set(fmt.Sprintf("repos/acme/repo/commits/sha%d/status", i), combinedStatus{State: "success"})
+		client.set(fmt.Sprintf("repos/acme/repo/commits/sha%d/check-runs", i), checkRunsResponse{})
+		pulls = append(pulls, pr)
+	}
+	client.set("repos/acme/repo/pulls", pulls)
+
+	options := DependabotOptions{Repository: "acme/repo", Concurrency: 1, Depth: DepthHealth}
+	report, err := NewDependabotCollector(client, options).Collect(context.Background(), "test")
+	if err != nil {
+		t.Fatalf("Collect returned an error: %v", err)
+	}
+	repo := report.Repositories[0]
+	if repo.VersionUpdates.EcosystemLimits["npm"] != 8 {
+		t.Fatalf("npm ecosystem limit = %d, want 8 (3 + 5 summed across both blocks)", repo.VersionUpdates.EcosystemLimits["npm"])
+	}
+	if repo.Status.PullRequestHealth != model.PRHealthHealthy {
+		t.Fatalf("pull request health = %q, want healthy: 7 open pull requests is under the combined limit of 8 "+
+			"(the old formula, defaultLimitPerBlock*uniqueEcosystems=5*1=5, would have wrongly reported backlogged)",
+			repo.Status.PullRequestHealth)
+	}
+	if repo.Status.Overall != model.SeverityHealthy {
+		t.Fatalf("overall = %q, want healthy (reasons: %v)", repo.Status.Overall, repo.Status.Reasons)
+	}
+}
+
+// TestDependabotCollectMitigationIsScopedToTheGapsEcosystem verifies the fix
+// for CCR's "blank-field" follow-on: a detected submission action must only
+// be treated as mitigating manifests in the ecosystem(s) it actually
+// resolves. A Maven-specific submission action must not be treated as
+// mitigating an unrelated NuGet manifest gap, even though some auto
+// submission mechanism was found in the workflow files.
+func TestDependabotCollectMitigationIsScopedToTheGapsEcosystem(t *testing.T) {
+	client := newDependabotFakeClient()
+	csprojNode := dependencyGraphManifestNode{Filename: "api.csproj", Parseable: true, DependenciesCount: 2}
+	csprojNode.Dependencies.Nodes = directDependencyNodes(2)
+	baseRepoResponses(t, client, []dependencyGraphManifestNode{csprojNode})
+
+	client.set("repos/acme/repo/contents/.github/workflows", []contentsEntry{
+		{Type: "file", Name: "submit.yml", Path: ".github/workflows/submit.yml"},
+	})
+	workflow := "jobs:\n  submit:\n    steps:\n      - uses: advanced-security/maven-dependency-submission-action@v4\n"
+	client.set("repos/acme/repo/contents/.github/workflows/submit.yml", map[string]any{
+		"type":    "file",
+		"name":    "submit.yml",
+		"path":    ".github/workflows/submit.yml",
+		"content": base64.StdEncoding.EncodeToString([]byte(workflow)),
+	})
+
+	options := DependabotOptions{Repository: "acme/repo", Concurrency: 1, Depth: DepthHealth}
+	report, err := NewDependabotCollector(client, options).Collect(context.Background(), "test")
+	if err != nil {
+		t.Fatalf("Collect returned an error: %v", err)
+	}
+	repo := report.Repositories[0]
+	if !repo.DependencyGraph.AutoSubmissionDetected {
+		t.Fatal("auto submission detected = false, want true: the Maven action was found in a workflow file")
+	}
+	if repo.Status.DependencyGraphCoverage != model.GraphCoveragePartial {
+		t.Fatalf("coverage = %q, want partial: a Maven-only submission action must not mitigate an unrelated NuGet gap", repo.Status.DependencyGraphCoverage)
+	}
+	if repo.Status.Overall != model.SeverityDegraded {
+		t.Fatalf("overall = %q, want degraded (reasons: %v)", repo.Status.Overall, repo.Status.Reasons)
+	}
+}
+
+// TestDependabotCollectIgnoresCommentedOutSubmissionMarkers verifies that a
+// marker referenced only inside a commented-out, disabled workflow step is
+// not mistaken for active mitigation.
+func TestDependabotCollectIgnoresCommentedOutSubmissionMarkers(t *testing.T) {
+	client := newDependabotFakeClient()
+	pomNode := dependencyGraphManifestNode{Filename: "pom.xml", Parseable: true, DependenciesCount: 2}
+	pomNode.Dependencies.Nodes = directDependencyNodes(2)
+	baseRepoResponses(t, client, []dependencyGraphManifestNode{pomNode})
+
+	client.set("repos/acme/repo/contents/.github/workflows", []contentsEntry{
+		{Type: "file", Name: "submit.yml", Path: ".github/workflows/submit.yml"},
+	})
+	workflow := "jobs:\n  submit:\n    steps:\n      # - uses: advanced-security/maven-dependency-submission-action@v4\n      - run: echo disabled\n"
+	client.set("repos/acme/repo/contents/.github/workflows/submit.yml", map[string]any{
+		"type":    "file",
+		"name":    "submit.yml",
+		"path":    ".github/workflows/submit.yml",
+		"content": base64.StdEncoding.EncodeToString([]byte(workflow)),
+	})
+
+	options := DependabotOptions{Repository: "acme/repo", Concurrency: 1, Depth: DepthHealth}
+	report, err := NewDependabotCollector(client, options).Collect(context.Background(), "test")
+	if err != nil {
+		t.Fatalf("Collect returned an error: %v", err)
+	}
+	repo := report.Repositories[0]
+	if repo.DependencyGraph.AutoSubmissionDetected {
+		t.Errorf("auto submission detected = true, want false: the only reference was commented out (action %q)", repo.DependencyGraph.AutoSubmissionAction)
+	}
+	if repo.Status.DependencyGraphCoverage != model.GraphCoveragePartial {
+		t.Fatalf("coverage = %q, want partial", repo.Status.DependencyGraphCoverage)
+	}
+}
+
+// TestDependabotCollectIgnoresOptInGradleActions verifies that
+// gradle/actions/setup-gradle and gradle/gradle-build-action, whose
+// dependency-graph submission behavior defaults to disabled (opt-in via an
+// explicit input), are no longer treated as evidence of active mitigation;
+// only the dedicated, always-on gradle/actions/dependency-submission is.
+func TestDependabotCollectIgnoresOptInGradleActions(t *testing.T) {
+	client := newDependabotFakeClient()
+	gradleNode := dependencyGraphManifestNode{Filename: "build.gradle", Parseable: true, DependenciesCount: 2}
+	gradleNode.Dependencies.Nodes = directDependencyNodes(2)
+	baseRepoResponses(t, client, []dependencyGraphManifestNode{gradleNode})
+
+	client.set("repos/acme/repo/contents/.github/workflows", []contentsEntry{
+		{Type: "file", Name: "build.yml", Path: ".github/workflows/build.yml"},
+	})
+	workflow := "jobs:\n  build:\n    steps:\n      - uses: gradle/actions/setup-gradle@v3\n"
+	client.set("repos/acme/repo/contents/.github/workflows/build.yml", map[string]any{
+		"type":    "file",
+		"name":    "build.yml",
+		"path":    ".github/workflows/build.yml",
+		"content": base64.StdEncoding.EncodeToString([]byte(workflow)),
+	})
+
+	options := DependabotOptions{Repository: "acme/repo", Concurrency: 1, Depth: DepthHealth}
+	report, err := NewDependabotCollector(client, options).Collect(context.Background(), "test")
+	if err != nil {
+		t.Fatalf("Collect returned an error: %v", err)
+	}
+	repo := report.Repositories[0]
+	if repo.DependencyGraph.AutoSubmissionDetected {
+		t.Errorf("auto submission detected = true, want false: setup-gradle alone does not submit by default (action %q)", repo.DependencyGraph.AutoSubmissionAction)
+	}
+	if repo.Status.DependencyGraphCoverage != model.GraphCoveragePartial {
+		t.Fatalf("coverage = %q, want partial", repo.Status.DependencyGraphCoverage)
+	}
+}
+
+// TestDependabotCollectDetectsClassicBranchProtection verifies that a
+// repository enforcing its dependency-review check purely through the
+// older, separate classic branch-protection system (not rulesets) is still
+// recognized. GET /rules/branches/{branch} only reflects rulesets; a
+// repository relying solely on classic protection was previously always
+// misreported as not-enforced.
+func TestDependabotCollectDetectsClassicBranchProtection(t *testing.T) {
+	client := newDependabotFakeClient()
+	baseRepoResponses(t, client, nil)
+	client.set("repos/acme/repo/rules/branches/main", []branchRule{})
+	client.set("repos/acme/repo/branches/main/protection/required_status_checks", map[string]any{
+		"contexts": []string{"dependency review"},
+	})
+
+	options := DependabotOptions{
+		Repository: "acme/repo", Concurrency: 1, Depth: DepthDiagnostics,
+		DependencyReviewCheckPattern: "dependency review",
+	}
+	report, err := NewDependabotCollector(client, options).Collect(context.Background(), "test")
+	if err != nil {
+		t.Fatalf("Collect returned an error: %v", err)
+	}
+	repo := report.Repositories[0]
+	if repo.Status.DependencyReview != model.DependencyReviewEnforced {
+		t.Fatalf("dependency review = %q, want enforced (classic branch protection must also be checked)", repo.Status.DependencyReview)
+	}
+	if repo.DependencyReview.MatchedCheckContext != "dependency review" {
+		t.Errorf("matched check context = %q, want %q", repo.DependencyReview.MatchedCheckContext, "dependency review")
+	}
+}
+
+// TestDependabotCollectAlertPaginationCapRecordsTruncation verifies that
+// hitting the open-alerts page budget while the last fetched page was a
+// full page (a proxy for "more may exist") is recorded as a collection
+// error, rather than silently reporting a truncated alert count as the
+// complete picture.
+func TestDependabotCollectAlertPaginationCapRecordsTruncation(t *testing.T) {
+	client := newDependabotFakeClient()
+	baseRepoResponses(t, client, nil)
+
+	client.setPaginated("repos/acme/repo/dependabot/alerts", func(collect func([]byte) error) error {
+		page := make([]dependabotAlert, 100)
+		for i := range page {
+			page[i].State = "open"
+			page[i].SecurityAdvisory.Severity = "low"
+		}
+		encoded, err := json.Marshal(page)
+		if err != nil {
+			return err
+		}
+		// Simulate a repository with far more open alerts than the page
+		// budget by always returning a full (100-item) page.
+		for i := 0; i < 10; i++ {
+			if err := collect(encoded); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+
+	options := DependabotOptions{Repository: "acme/repo", Concurrency: 1, Depth: DepthHealth}
+	report, err := NewDependabotCollector(client, options).Collect(context.Background(), "test")
+	if err != nil {
+		t.Fatalf("Collect returned an error: %v", err)
+	}
+	repo := report.Repositories[0]
+	if repo.Alerts.OpenTotal != 300 {
+		t.Fatalf("open total = %d, want 300 (3 pages of 100, the page budget)", repo.Alerts.OpenTotal)
+	}
+	found := false
+	for _, e := range repo.Errors {
+		if strings.Contains(e, "stopped after 3 pages") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected a truncation error in repo.Errors, got: %v", repo.Errors)
+	}
+	if !repo.Status.Incomplete {
+		t.Error("Status.Incomplete = false, want true")
+	}
+	if repo.Status.Overall != model.SeverityUnknown {
+		t.Fatalf("overall = %q, want unknown (truncated alert evidence must not be reported healthy)", repo.Status.Overall)
+	}
+}
+
+// TestDependabotCollectPullRequestLinkagePaginationCapRecordsTruncation
+// verifies that hitting the vulnerability-alert-linkage page budget while
+// the server still reports more pages available is recorded as a
+// collection error, since the linkage map built so far is genuinely
+// partial and could misclassify a security update pull request as a
+// version update.
+func TestDependabotCollectPullRequestLinkagePaginationCapRecordsTruncation(t *testing.T) {
+	client := newDependabotFakeClient()
+	baseRepoResponses(t, client, nil)
+
+	createdAt := time.Now().Add(-1 * time.Hour)
+	pr := pullRequest{Number: 1, Body: "Bumps foo from 1.0.0 to 1.0.1", CreatedAt: &createdAt}
+	pr.User.Login = "dependabot[bot]"
+	pr.Head.SHA = "abc123"
+	client.set("repos/acme/repo/pulls", []pullRequest{pr})
+	client.set("repos/acme/repo/commits/abc123/status", combinedStatus{State: "success"})
+	client.set("repos/acme/repo/commits/abc123/check-runs", checkRunsResponse{})
+
+	baseGraphQL := client.graphql
+	client.graphql = func(query string, variables map[string]any, out any) error {
+		if !strings.Contains(query, "vulnerabilityAlerts") {
+			return baseGraphQL(query, variables, out)
+		}
+		response, ok := out.(*vulnerabilityAlertsPullRequestsResponse)
+		if !ok {
+			return fmt.Errorf("unexpected GraphQL output type %T", out)
+		}
+		response.Repository = &struct {
+			VulnerabilityAlerts struct {
+				PageInfo struct {
+					HasNextPage bool   `json:"hasNextPage"`
+					EndCursor   string `json:"endCursor"`
+				} `json:"pageInfo"`
+				Nodes []vulnerabilityAlertPullRequestNode `json:"nodes"`
+			} `json:"vulnerabilityAlerts"`
+		}{}
+		response.Repository.VulnerabilityAlerts.PageInfo.HasNextPage = true
+		response.Repository.VulnerabilityAlerts.PageInfo.EndCursor = "next"
+		return nil
+	}
+
+	options := DependabotOptions{Repository: "acme/repo", Concurrency: 1, Depth: DepthHealth}
+	report, err := NewDependabotCollector(client, options).Collect(context.Background(), "test")
+	if err != nil {
+		t.Fatalf("Collect returned an error: %v", err)
+	}
+	repo := report.Repositories[0]
+	found := false
+	for _, e := range repo.Errors {
+		if strings.Contains(e, "vulnerability alert pull request linkage: stopped after 5 pages") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected a pull request linkage truncation error in repo.Errors, got: %v", repo.Errors)
+	}
+	if !repo.Status.Incomplete {
+		t.Error("Status.Incomplete = false, want true")
+	}
+}
+
+// TestDependabotCollectFlagsUnparseableAndOversizedManifestsAsIncomplete
+// verifies that a manifest the dependency graph could not parse at all, or
+// one that exceeded the graph's maximum size, is surfaced as a collection
+// error (not just a silently-populated list field), so it correctly
+// prevents a false healthy verdict via Status.Incomplete.
+func TestDependabotCollectFlagsUnparseableAndOversizedManifestsAsIncomplete(t *testing.T) {
+	client := newDependabotFakeClient()
+	baseRepoResponses(t, client, []dependencyGraphManifestNode{
+		{Filename: "broken.json", Parseable: false},
+		{Filename: "huge-lockfile.json", Parseable: true, ExceedsMaxSize: true},
+	})
+
+	options := DependabotOptions{Repository: "acme/repo", Concurrency: 1, Depth: DepthHealth}
+	report, err := NewDependabotCollector(client, options).Collect(context.Background(), "test")
+	if err != nil {
+		t.Fatalf("Collect returned an error: %v", err)
+	}
+	repo := report.Repositories[0]
+	if len(repo.DependencyGraph.UnparseableManifests) != 1 || repo.DependencyGraph.UnparseableManifests[0] != "broken.json" {
+		t.Errorf("unparseable manifests = %v, want [broken.json]", repo.DependencyGraph.UnparseableManifests)
+	}
+	if len(repo.DependencyGraph.OversizedManifests) != 1 || repo.DependencyGraph.OversizedManifests[0] != "huge-lockfile.json" {
+		t.Errorf("oversized manifests = %v, want [huge-lockfile.json]", repo.DependencyGraph.OversizedManifests)
+	}
+	if !repo.Status.Incomplete {
+		t.Fatal("Status.Incomplete = false, want true: unparseable/oversized manifests are a real evidence gap")
+	}
+	if repo.Status.Overall != model.SeverityUnknown {
+		t.Fatalf("overall = %q, want unknown (reasons: %v, errors: %v)", repo.Status.Overall, repo.Status.Reasons, repo.Errors)
+	}
+}
+
+// TestDependabotCollectCappedDependencySampleIsInconclusiveNotConfirmed
+// verifies that a manifest whose dependency sample was truncated by the
+// GraphQL query's own per-manifest cap (only the first 100 dependencies are
+// inspected), and none of the inspected dependencies were transitive, is
+// not confidently reported as a confirmed transitive-coverage gap: a
+// transitive relationship could still appear beyond the inspected sample.
+// This must instead be recorded as an inconclusive collection note.
+func TestDependabotCollectCappedDependencySampleIsInconclusiveNotConfirmed(t *testing.T) {
+	client := newDependabotFakeClient()
+	pomNode := dependencyGraphManifestNode{Filename: "pom.xml", Parseable: true, DependenciesCount: 150}
+	pomNode.Dependencies.Nodes = directDependencyNodes(100)
+	baseRepoResponses(t, client, []dependencyGraphManifestNode{pomNode})
+
+	options := DependabotOptions{Repository: "acme/repo", Concurrency: 1, Depth: DepthHealth}
+	report, err := NewDependabotCollector(client, options).Collect(context.Background(), "test")
+	if err != nil {
+		t.Fatalf("Collect returned an error: %v", err)
+	}
+	repo := report.Repositories[0]
+	if len(repo.DependencyGraph.ManifestsMissingTransitive) != 0 {
+		t.Fatalf("manifests missing transitive = %v, want none: a capped 100-dependency sample with 150 total "+
+			"must not be confidently reported as a confirmed gap", repo.DependencyGraph.ManifestsMissingTransitive)
+	}
+	found := false
+	for _, e := range repo.Errors {
+		if strings.Contains(e, "only the first 100 could be inspected") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected an inconclusive-coverage note in repo.Errors, got: %v", repo.Errors)
+	}
+	if !repo.Status.Incomplete {
+		t.Error("Status.Incomplete = false, want true")
+	}
+	if repo.Status.Overall != model.SeverityUnknown {
+		t.Fatalf("overall = %q, want unknown (an inconclusive manifest must not be silently folded into a healthy verdict)", repo.Status.Overall)
 	}
 }

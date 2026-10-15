@@ -47,6 +47,15 @@ type dependabotFakeClient struct {
 	// truncation.
 	paginatedOverrides map[string]func(collect func([]byte) error) error
 
+	// manifestFollowup configures the response to the follow-up
+	// node(id:)-based query manifestHasTransitiveDependencyBeyondSample
+	// issues when a manifest's initial dependencies(first:100) sample was
+	// capped. Keyed by manifest ID; a test registers one entry per manifest
+	// it wants to control. If unset entirely (nil map or no matching key),
+	// baseRepoResponses' default graphql handler reports hasNextPage=false
+	// with no further dependencies, i.e. "nothing more to find".
+	manifestFollowup map[string]func(cursor string) (relationships []string, hasNextPage bool, nextCursor string)
+
 	mu     sync.Mutex
 	warned map[string]bool
 }
@@ -58,6 +67,7 @@ func newDependabotFakeClient() *dependabotFakeClient {
 		securityUpdatePRNumbers:     map[int]bool{},
 		securityUpdateStalePackages: map[string]bool{},
 		paginatedOverrides:          map[string]func(collect func([]byte) error) error{},
+		manifestFollowup:            map[string]func(cursor string) ([]string, bool, string){},
 	}
 }
 
@@ -174,7 +184,40 @@ func baseRepoResponses(t *testing.T, client *dependabotFakeClient, manifestNodes
 		"content": base64.StdEncoding.EncodeToString([]byte(dependabotYML)),
 	})
 
-	client.graphql = func(query string, _ map[string]any, out any) error {
+	client.graphql = func(query string, variables map[string]any, out any) error {
+		if strings.Contains(query, "node(id:") {
+			response, ok := out.(*manifestDependenciesPageResponse)
+			if !ok {
+				return fmt.Errorf("unexpected GraphQL output type %T", out)
+			}
+			id, _ := variables["id"].(string)
+			cursor, _ := variables["cursor"].(string)
+			var relationships []string
+			hasNextPage := false
+			nextCursor := ""
+			if fn, ok := client.manifestFollowup[id]; ok {
+				relationships, hasNextPage, nextCursor = fn(cursor)
+			}
+			response.Node = &struct {
+				Dependencies struct {
+					PageInfo struct {
+						HasNextPage bool   `json:"hasNextPage"`
+						EndCursor   string `json:"endCursor"`
+					} `json:"pageInfo"`
+					Nodes []struct {
+						Relationship string `json:"relationship"`
+					} `json:"nodes"`
+				} `json:"dependencies"`
+			}{}
+			response.Node.Dependencies.PageInfo.HasNextPage = hasNextPage
+			response.Node.Dependencies.PageInfo.EndCursor = nextCursor
+			for _, relationship := range relationships {
+				response.Node.Dependencies.Nodes = append(response.Node.Dependencies.Nodes, struct {
+					Relationship string `json:"relationship"`
+				}{Relationship: relationship})
+			}
+			return nil
+		}
 		if strings.Contains(query, "vulnerabilityAlerts") {
 			response, ok := out.(*vulnerabilityAlertsPullRequestsResponse)
 			if !ok {
@@ -1700,12 +1743,22 @@ func TestDependabotCollectFlagsUnparseableAndOversizedManifestsAsIncomplete(t *t
 // inspected), and none of the inspected dependencies were transitive, is
 // not confidently reported as a confirmed transitive-coverage gap: a
 // transitive relationship could still appear beyond the inspected sample.
-// This must instead be recorded as an inconclusive collection note.
+// This test simulates exhausting manifestHasTransitiveDependencyBeyondSample's
+// pagination safety cap without finding one; that remaining ambiguity must
+// be recorded as an inconclusive collection note.
 func TestDependabotCollectCappedDependencySampleIsInconclusiveNotConfirmed(t *testing.T) {
 	client := newDependabotFakeClient()
-	pomNode := dependencyGraphManifestNode{Filename: "pom.xml", Parseable: true, DependenciesCount: 150}
+	pomNode := dependencyGraphManifestNode{ID: "manifest-1", Filename: "pom.xml", Parseable: true, DependenciesCount: 2000}
 	pomNode.Dependencies.Nodes = directDependencyNodes(100)
+	pomNode.Dependencies.PageInfo.HasNextPage = true
+	pomNode.Dependencies.PageInfo.EndCursor = "page1"
 	baseRepoResponses(t, client, []dependencyGraphManifestNode{pomNode})
+	// Every follow-up page reports more direct dependencies and always
+	// another page available, so the pagination safety cap is hit without
+	// ever finding a transitive relationship.
+	client.manifestFollowup["manifest-1"] = func(cursor string) ([]string, bool, string) {
+		return []string{"direct", "direct"}, true, cursor + "+"
+	}
 
 	options := DependabotOptions{Repository: "acme/repo", Concurrency: 1, Depth: DepthHealth}
 	report, err := NewDependabotCollector(client, options).Collect(context.Background(), "test")
@@ -1714,12 +1767,12 @@ func TestDependabotCollectCappedDependencySampleIsInconclusiveNotConfirmed(t *te
 	}
 	repo := report.Repositories[0]
 	if len(repo.DependencyGraph.ManifestsMissingTransitive) != 0 {
-		t.Fatalf("manifests missing transitive = %v, want none: a capped 100-dependency sample with 150 total "+
-			"must not be confidently reported as a confirmed gap", repo.DependencyGraph.ManifestsMissingTransitive)
+		t.Fatalf("manifests missing transitive = %v, want none: inspection was still incomplete when the safety cap was hit, "+
+			"so this must not be confidently reported as a confirmed gap", repo.DependencyGraph.ManifestsMissingTransitive)
 	}
 	found := false
 	for _, e := range repo.Errors {
-		if strings.Contains(e, "only the first 100 could be inspected") {
+		if strings.Contains(e, "inspection stopped after the pagination safety cap") {
 			found = true
 		}
 	}
@@ -1731,5 +1784,80 @@ func TestDependabotCollectCappedDependencySampleIsInconclusiveNotConfirmed(t *te
 	}
 	if repo.Status.Overall != model.SeverityUnknown {
 		t.Fatalf("overall = %q, want unknown (an inconclusive manifest must not be silently folded into a healthy verdict)", repo.Status.Overall)
+	}
+}
+
+// TestDependabotCollectPaginatesBeyondSampleAndFindsTransitiveDependency
+// verifies that when a manifest's initial 100-dependency sample has no
+// transitive dependency but more dependencies remain, paginating further
+// and finding a transitive one there resolves the ambiguity as coverage
+// complete, not a confirmed gap and not merely inconclusive — the schema
+// fully supports paging past the initial sample, so this should not be left
+// unresolved when the real answer is reachable.
+func TestDependabotCollectPaginatesBeyondSampleAndFindsTransitiveDependency(t *testing.T) {
+	client := newDependabotFakeClient()
+	pomNode := dependencyGraphManifestNode{ID: "manifest-2", Filename: "pom.xml", Parseable: true, DependenciesCount: 150}
+	pomNode.Dependencies.Nodes = directDependencyNodes(100)
+	pomNode.Dependencies.PageInfo.HasNextPage = true
+	pomNode.Dependencies.PageInfo.EndCursor = "page1"
+	baseRepoResponses(t, client, []dependencyGraphManifestNode{pomNode})
+	client.manifestFollowup["manifest-2"] = func(cursor string) ([]string, bool, string) {
+		return []string{"transitive", "direct"}, false, ""
+	}
+
+	options := DependabotOptions{Repository: "acme/repo", Concurrency: 1, Depth: DepthHealth}
+	report, err := NewDependabotCollector(client, options).Collect(context.Background(), "test")
+	if err != nil {
+		t.Fatalf("Collect returned an error: %v", err)
+	}
+	repo := report.Repositories[0]
+	if len(repo.DependencyGraph.ManifestsMissingTransitive) != 0 {
+		t.Fatalf("manifests missing transitive = %v, want none: a transitive dependency was found beyond the initial sample",
+			repo.DependencyGraph.ManifestsMissingTransitive)
+	}
+	if repo.Status.DependencyGraphCoverage != model.GraphCoverageComplete {
+		t.Fatalf("coverage = %q, want complete", repo.Status.DependencyGraphCoverage)
+	}
+	for _, e := range repo.Errors {
+		if strings.Contains(e, "pom.xml") {
+			t.Errorf("unexpected error for a fully-resolved manifest: %q", e)
+		}
+	}
+}
+
+// TestDependabotCollectPaginatesBeyondSampleAndConfirmsGap verifies that
+// when pagination is able to run all the way to the end of a manifest's
+// dependency list (hasNextPage eventually false) without ever finding a
+// transitive dependency, the gap is now reported as confirmed — not an
+// inconclusive sampling artifact — since every dependency was actually
+// inspected.
+func TestDependabotCollectPaginatesBeyondSampleAndConfirmsGap(t *testing.T) {
+	client := newDependabotFakeClient()
+	pomNode := dependencyGraphManifestNode{ID: "manifest-3", Filename: "pom.xml", Parseable: true, DependenciesCount: 150}
+	pomNode.Dependencies.Nodes = directDependencyNodes(100)
+	pomNode.Dependencies.PageInfo.HasNextPage = true
+	pomNode.Dependencies.PageInfo.EndCursor = "page1"
+	baseRepoResponses(t, client, []dependencyGraphManifestNode{pomNode})
+	client.manifestFollowup["manifest-3"] = func(cursor string) ([]string, bool, string) {
+		return []string{"direct", "direct"}, false, ""
+	}
+
+	options := DependabotOptions{Repository: "acme/repo", Concurrency: 1, Depth: DepthHealth}
+	report, err := NewDependabotCollector(client, options).Collect(context.Background(), "test")
+	if err != nil {
+		t.Fatalf("Collect returned an error: %v", err)
+	}
+	repo := report.Repositories[0]
+	if len(repo.DependencyGraph.ManifestsMissingTransitive) != 1 || repo.DependencyGraph.ManifestsMissingTransitive[0] != "pom.xml" {
+		t.Fatalf("manifests missing transitive = %v, want [pom.xml]: every dependency was inspected and none was transitive",
+			repo.DependencyGraph.ManifestsMissingTransitive)
+	}
+	if repo.Status.DependencyGraphCoverage != model.GraphCoveragePartial {
+		t.Fatalf("coverage = %q, want partial", repo.Status.DependencyGraphCoverage)
+	}
+	for _, e := range repo.Errors {
+		if strings.Contains(e, "inconclusive") || strings.Contains(e, "unknown, not confirmed") {
+			t.Errorf("a fully-paginated manifest must not be reported as inconclusive: %q", e)
+		}
 	}
 }

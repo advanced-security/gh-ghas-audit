@@ -1044,11 +1044,13 @@ func (c *DependabotCollector) collectDependencyGraph(ctx context.Context, org, n
       totalCount
       pageInfo{hasNextPage endCursor}
       nodes{
+        id
         filename
         parseable
         exceedsMaxSize
         dependenciesCount
         dependencies(first:100){
+          pageInfo{hasNextPage endCursor}
           nodes{relationship}
         }
       }
@@ -1114,20 +1116,43 @@ func (c *DependabotCollector) collectDependencyGraph(ctx context.Context, org, n
 			}
 			if node.DependenciesCount > len(node.Dependencies.Nodes) && len(node.Dependencies.Nodes) >= inspectedDependenciesPerManifest {
 				// Only the first inspectedDependenciesPerManifest
-				// dependencies were inspected (the GraphQL query above caps
-				// this per manifest), and none of them were transitive, but
-				// the manifest has more dependencies than were inspected. A
-				// transitive relationship could still appear beyond the
-				// inspected sample; reporting a confirmed gap here would be
-				// a false positive for an actually-resolved manifest with a
-				// large, direct-dependency-heavy dependency list. This is
-				// recorded as a collection note so the ambiguity is visible
-				// rather than silently asserting a gap.
-				repo.Errors = append(repo.Errors, fmt.Sprintf(
-					"dependency graph manifests: %s has %d dependencies, only the first %d could be inspected; "+
-						"transitive coverage for this manifest is unknown, not confirmed missing",
-					node.Filename, node.DependenciesCount, len(node.Dependencies.Nodes)))
-				continue
+				// dependencies were inspected so far, and none of them were
+				// transitive, but the manifest has more dependencies than
+				// that. The GraphQL schema's dependencies connection
+				// actually supports full cursor pagination (confirmed via
+				// the public schema and live testing), so rather than just
+				// flagging this as inconclusive, page through the rest of
+				// this specific manifest's dependencies looking for a
+				// transitive one. This is bounded to only the rare manifest
+				// that needs it (most manifests never reach this branch at
+				// all), not a blanket per-repository cost.
+				resolved, foundTransitive, err := c.manifestHasTransitiveDependencyBeyondSample(
+					ctx, node.ID, node.Dependencies.PageInfo.EndCursor, node.Dependencies.PageInfo.HasNextPage)
+				if err != nil {
+					repo.Errors = append(repo.Errors, fmt.Sprintf(
+						"dependency graph manifests: %s: could not inspect dependencies beyond the first %d: %v",
+						node.Filename, len(node.Dependencies.Nodes), err))
+					continue
+				}
+				if foundTransitive {
+					continue
+				}
+				if !resolved {
+					// The safety cap was hit before exhausting every page;
+					// a transitive dependency could still exist beyond the
+					// (now much larger) inspected sample. Reporting a
+					// confirmed gap here would still risk a false positive,
+					// so this is recorded as an inconclusive collection
+					// note instead.
+					repo.Errors = append(repo.Errors, fmt.Sprintf(
+						"dependency graph manifests: %s has %d dependencies; inspection stopped after the pagination "+
+							"safety cap with no transitive dependency found yet, so transitive coverage is unknown, not confirmed missing",
+						node.Filename, node.DependenciesCount))
+					continue
+				}
+				// Every dependency was inspected (pagination fully
+				// exhausted) and none was transitive: this is now a
+				// confirmed gap, not a sampling artifact.
 			}
 			missingTransitive = append(missingTransitive, node.Filename)
 		}
@@ -1212,6 +1237,68 @@ func (c *DependabotCollector) collectDependencyGraph(ctx context.Context, org, n
 	default:
 		repo.Status.DependencyGraphCoverage = model.GraphCoverageNotApplicable
 	}
+}
+
+// maxManifestDependencyPaginationPages bounds how many additional
+// dependencies(first:100) pages manifestHasTransitiveDependencyBeyondSample
+// will fetch for a single manifest beyond the initial sample already read
+// by collectDependencyGraph's bulk query. This keeps the cost of resolving
+// one ambiguous, capped-sample manifest bounded (at most this many extra
+// GraphQL round trips for that one manifest) rather than open-ended for a
+// pathological manifest with an extremely large dependency list.
+const maxManifestDependencyPaginationPages = 10
+
+// manifestHasTransitiveDependencyBeyondSample pages through a single
+// manifest's remaining dependencies (via the Node interface, since
+// DependencyGraphManifest implements it) looking for any transitive
+// relationship not already seen in the initial dependencies(first:100)
+// sample read by collectDependencyGraph. It stops as soon as one is found.
+// resolved reports whether every remaining dependency was inspected
+// (pagination reached hasNextPage=false) before the safety cap; when
+// resolved is false, the manifest's remaining dependencies were only
+// partially inspected and the result is inconclusive, not a confirmed
+// absence of transitive coverage.
+func (c *DependabotCollector) manifestHasTransitiveDependencyBeyondSample(
+	ctx context.Context, manifestID, cursor string, hasNextPage bool,
+) (resolved bool, foundTransitive bool, err error) {
+	const query = `query($id:ID!,$cursor:String){
+  node(id:$id){
+    ... on DependencyGraphManifest {
+      dependencies(first:100,after:$cursor){
+        pageInfo{hasNextPage endCursor}
+        nodes{relationship}
+      }
+    }
+  }
+}`
+	for page := 0; hasNextPage; page++ {
+		if page >= maxManifestDependencyPaginationPages {
+			return false, false, nil
+		}
+		var response manifestDependenciesPageResponse
+		variables := map[string]any{"id": manifestID, "cursor": (*string)(nil)}
+		if cursor != "" {
+			variables["cursor"] = cursor
+		}
+		if err := c.client.GraphQL(ctx, query, variables, &response); err != nil {
+			return false, false, err
+		}
+		if response.Node == nil {
+			// The manifest node could no longer be resolved (for example,
+			// deleted between the initial query and this follow-up); treat
+			// this the same as any other collection failure rather than
+			// silently asserting a confirmed gap.
+			return false, false, fmt.Errorf("manifest node not found")
+		}
+		for _, dependency := range response.Node.Dependencies.Nodes {
+			if strings.EqualFold(dependency.Relationship, "transitive") {
+				return true, true, nil
+			}
+		}
+		hasNextPage = response.Node.Dependencies.PageInfo.HasNextPage
+		cursor = response.Node.Dependencies.PageInfo.EndCursor
+	}
+	return true, false, nil
 }
 
 // joinDetectorIDs renders the IDs of matched detectors for display in

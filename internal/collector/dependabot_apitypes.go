@@ -88,15 +88,42 @@ type dependencyGraphManifestsResponse struct {
 }
 
 type dependencyGraphManifestNode struct {
+	ID                string `json:"id"`
 	Filename          string `json:"filename"`
 	Parseable         bool   `json:"parseable"`
 	ExceedsMaxSize    bool   `json:"exceedsMaxSize"`
 	DependenciesCount int    `json:"dependenciesCount"`
 	Dependencies      struct {
+		PageInfo struct {
+			HasNextPage bool   `json:"hasNextPage"`
+			EndCursor   string `json:"endCursor"`
+		} `json:"pageInfo"`
 		Nodes []struct {
 			Relationship string `json:"relationship"`
 		} `json:"nodes"`
 	} `json:"dependencies"`
+}
+
+// manifestDependenciesPageResponse mirrors a follow-up query re-fetching a
+// single DependencyGraphManifest by its node ID (it implements GraphQL's
+// Node interface), used to page past the initial dependencies(first:100)
+// sample when a manifest has more dependencies than that and none of the
+// inspected ones were transitive. Unlike the bulk dependencyGraphManifests
+// query, this is only ever issued for the rare manifest that actually needs
+// it, so its cost is bounded by the number of such manifests, not by total
+// dependency count across the repository.
+type manifestDependenciesPageResponse struct {
+	Node *struct {
+		Dependencies struct {
+			PageInfo struct {
+				HasNextPage bool   `json:"hasNextPage"`
+				EndCursor   string `json:"endCursor"`
+			} `json:"pageInfo"`
+			Nodes []struct {
+				Relationship string `json:"relationship"`
+			} `json:"nodes"`
+		} `json:"dependencies"`
+	} `json:"node"`
 }
 
 // vulnerabilityAlertsPullRequestsResponse mirrors the GraphQL

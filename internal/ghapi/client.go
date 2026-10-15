@@ -477,15 +477,14 @@ func (c *Client) release() { <-c.semaphore }
 
 // GraphQL executes a GraphQL query and decodes the response into out.
 func (c *Client) GraphQL(ctx context.Context, query string, variables map[string]any, out any) error {
-	if err := c.acquire(ctx); err != nil {
-		return err
-	}
-	defer c.release()
-
 	var lastErr error
 	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if err := c.acquire(ctx); err != nil {
+			return err
+		}
 		c.stats.GraphQLRequests.Add(1)
 		err := c.graphql.DoWithContext(ctx, query, variables, out)
+		c.release()
 		if err == nil {
 			return nil
 		}
@@ -493,7 +492,70 @@ func (c *Client) GraphQL(ctx context.Context, query string, variables map[string
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+
+		// The GraphQL transport reports non-2xx responses as *api.HTTPError,
+		// which carries the same headers and body a REST 403/429 would. A
+		// secondary rate limit here must be retried exactly like a REST one:
+		// otherwise a query as commonly throttled as dependencyGraphManifests
+		// fails permanently on its first hit and gets misreported as an
+		// unreadable repository rather than a transient throttle.
+		var httpErr *api.HTTPError
+		if errors.As(err, &httpErr) && (httpErr.StatusCode == http.StatusForbidden || httpErr.StatusCode == http.StatusTooManyRequests) {
+			wait, isRateLimit := rateLimitDelay(httpErr.Headers, []byte(httpErr.Message))
+			if httpErr.StatusCode == http.StatusTooManyRequests && !isRateLimit {
+				isRateLimit = true
+				wait = defaultSecondaryWait
+			}
+			if isRateLimit {
+				if attempt+1 >= maxAttempts {
+					return newStatusError(httpErr.StatusCode, []byte(httpErr.Message), requestURL(httpErr), true)
+				}
+				c.stats.RateLimitWaits.Add(1)
+				if waitErr := sleepCtx(ctx, wait); waitErr != nil {
+					return waitErr
+				}
+				continue
+			}
+		}
+
+		// A 5xx from the GraphQL endpoint (bad gateway, service unavailable,
+		// gateway timeout) is GitHub's own infrastructure faltering, not a
+		// problem with the query; it is not a rate limit (handled above) and
+		// its error text ("HTTP 502: 502 Bad Gateway") does not match any
+		// isRetryableTransport hint below, so without this check it fails
+		// permanently on the first occurrence.
+		if errors.As(err, &httpErr) && httpErr.StatusCode >= 500 {
+			if attempt+1 >= maxAttempts {
+				return err
+			}
+			if waitErr := sleepCtx(ctx, backoff(attempt)); waitErr != nil {
+				return waitErr
+			}
+			continue
+		}
+
+		// GitHub's GraphQL engine can report a field-level execution timeout
+		// (a *api.GraphQLError with message "timedout", distinct from an
+		// *api.HTTPError and from a transport-level timeout) for expensive
+		// fields such as dependencyGraphManifests when a repository has a
+		// large or complex dependency graph to resolve. This is ordinarily
+		// transient load on GitHub's side, not a permanently broken query, so
+		// it is retried the same way a transport error would be.
+		var gqlErr *api.GraphQLError
+		if errors.As(err, &gqlErr) && isRetryableGraphQLError(gqlErr) {
+			if attempt+1 >= maxAttempts {
+				return err
+			}
+			if waitErr := sleepCtx(ctx, backoff(attempt)); waitErr != nil {
+				return waitErr
+			}
+			continue
+		}
+
 		if !isRetryableTransport(err) {
+			return err
+		}
+		if attempt+1 >= maxAttempts {
 			return err
 		}
 		if waitErr := sleepCtx(ctx, backoff(attempt)); waitErr != nil {
@@ -501,6 +563,30 @@ func (c *Client) GraphQL(ctx context.Context, query string, variables map[string
 		}
 	}
 	return lastErr
+}
+
+// isRetryableGraphQLError reports whether a GraphQL response-level error is a
+// known-transient GitHub execution error, rather than a permanent problem
+// with the query itself (an invalid field, a missing argument, and so on,
+// which would fail identically on every retry). Only messages confirmed to
+// represent transient server-side conditions are matched, so a real query
+// bug is never masked behind a retry loop.
+func isRetryableGraphQLError(err *api.GraphQLError) bool {
+	for _, item := range err.Errors {
+		if strings.EqualFold(strings.TrimSpace(item.Message), "timedout") {
+			return true
+		}
+	}
+	return false
+}
+
+// requestURL renders the URL an *api.HTTPError failed against, tolerating a
+// nil RequestURL rather than risking a nil pointer dereference.
+func requestURL(err *api.HTTPError) string {
+	if err.RequestURL == nil {
+		return ""
+	}
+	return err.RequestURL.String()
 }
 
 // WarnOnce reports whether a warning key has already been emitted, so that a
@@ -611,7 +697,18 @@ func isRetryableTransport(err error) bool {
 		return false
 	}
 	message := strings.ToLower(err.Error())
-	for _, hint := range []string{"connection reset", "eof", "timeout", "temporary", "no such host", "broken pipe"} {
+	for _, hint := range []string{
+		"connection reset", "eof", "timeout", "temporary", "no such host", "broken pipe",
+		// "unexpected end of JSON input" is Go's encoding/json error for an
+		// empty or truncated response body (for example a connection that
+		// was cut mid-transfer after a 200 status was already sent). It is
+		// a read-completeness failure of the HTTP layer, not a problem with
+		// the query or its arguments, and would look identical on a retry
+		// against the same, unmodified request; it is retried the same as
+		// any other transport-level failure. It does not contain "eof"
+		// (Go's message spells it "JSON", not "EOF"), so needs its own hint.
+		"unexpected end of json input",
+	} {
 		if strings.Contains(message, hint) {
 			return true
 		}

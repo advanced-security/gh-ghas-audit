@@ -90,6 +90,7 @@ func newRootCommand() *cobra.Command {
 	)
 
 	rootCmd.AddCommand(newCodeScanningCommand(scope))
+	rootCmd.AddCommand(newDependabotCommand(scope))
 	rootCmd.AddCommand(&cobra.Command{
 		Use:   "version",
 		Short: "Print the extension version",

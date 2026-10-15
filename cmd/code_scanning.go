@@ -69,6 +69,7 @@ type codeScanningOptions struct {
 	deepMaxSarifMB   int
 	detailed         bool
 	quiet            bool
+	verbose          bool
 }
 
 func newCodeScanningCommand(scope *scopeOptions) *cobra.Command {
@@ -164,6 +165,8 @@ Examples:
 		"Add a detail column explaining why each repository has its status")
 	flags.BoolVar(&opts.quiet, "quiet", false,
 		"Suppress progress output")
+	flags.BoolVar(&opts.verbose, "verbose", false,
+		"Report every repository by name and status as it completes, instead of only a running count")
 
 	return cmd
 }
@@ -305,6 +308,7 @@ func (opts *codeScanningOptions) run(cmd *cobra.Command, _ []string) error {
 		Depth:                 depth,
 		DeepDiagnostics:       deepMode,
 		Progress:              progress,
+		Verbose:               opts.verbose,
 	}
 
 	if deepMode != collector.DeepDiagnosticsOff {

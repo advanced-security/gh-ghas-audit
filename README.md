@@ -1,6 +1,6 @@
 # gh-ghas-audit v2
 
-A [GitHub CLI][gh-cli] extension for CodeQL configuration, execution, freshness and language coverage across repositories, organizations and enterprises.
+A [GitHub CLI][gh-cli] extension auditing GitHub Advanced Security coverage across repositories, organizations and enterprises: CodeQL configuration, execution, freshness and language coverage (`code-scanning`), and dependency graph, Dependabot and pull request health (`dependabot`).
 
 ## Installation
 
@@ -129,6 +129,7 @@ Durations accept days or Go duration syntax, such as `14d` or `36h`. Each row re
 | `--output PATH` | Write to a file instead of stdout |
 | `--detailed` | Add explanations to the table |
 | `--quiet` | Suppress progress on stderr |
+| `--verbose` | Report every repository by name and status as it completes on stderr, instead of only a running count every 25 repositories |
 | `--fail-on` | Comma-separated overall statuses that produce exit code `2` |
 
 ```bash
@@ -237,6 +238,53 @@ GitHub App installation tokens work per organization, not for enterprise discove
 Install and invoke the CLI in a workflow. [`examples/code-scanning-status.yml`](examples/code-scanning-status.yml) uses App authentication, cache reuse, one collection, a job summary and artifact upload.
 
 The App-token example is limited to runs under one hour. Split larger scopes or run long diagnostics directly with suitable longer-lived credentials.
+
+## Dependabot / SCA health
+
+`gh ghas-audit dependabot` audits whether the dependency graph, Dependabot alerts,
+version updates, pull request health and dependency review enforcement are
+actually working, not just enabled. It shares `code-scanning`'s scope flags
+(`--organization`/`--organizations`, `--enterprise`, `--repository`, `--match`,
+`--exclude`, `--visibility`, `--skip-archived`, `--skip-forks`), cache flags,
+concurrency, `--status`/`--fail-on` and output formats (`table`, `json`,
+`ndjson`, `csv`; `language-csv` does not apply and is rejected).
+
+```bash
+gh ghas-audit dependabot --organization my-org
+gh ghas-audit dependabot --enterprise my-enterprise --scan-depth config
+gh ghas-audit dependabot -r owner/repo --scan-depth diagnostics
+gh ghas-audit dependabot -o my-org --fail-on failing,stalled
+```
+
+| `--scan-depth` | Evidence | Use / limitation |
+| --- | --- | --- |
+| `config` | Repository details and `.github/dependabot.yml` only | No runtime health verdict; never reports `healthy`. |
+| `health` **(default)** | Config plus dependency graph manifests, Dependabot alerts and pull request health | Default health assessment. Does not check dependency review enforcement. |
+| `diagnostics` | Health plus a per-branch required-status-check scan for dependency review enforcement | Adds `--dependency-review-check-pattern` matching; more expensive (one extra request per repository). |
+
+Health dimensions, each independent (mirroring `code-scanning`'s status model):
+
+| Dimension | What it evidences |
+| --- | --- |
+| Dependency graph | Whether `dependencyGraphManifests` returns evidence at all |
+| Dependency graph coverage | Whether Maven, Gradle, or NuGet manifests, which need build-time or lockfile resolution to show transitive dependencies, show no transitive relationships at all (`partial`), already show transitive dependencies (`complete`), or a known build-time dependency-submission workflow was detected covering the gap (`mitigated`). That check also runs, and is reported, when coverage is already `complete`, so a working auto-submission mechanism is confirmed rather than left unreported; it first scans Actions workflow files for a known Action, then, only when coverage is already complete, falls back to the repository's SBOM export to also detect GitHub's native, no-workflow-file "Automatic Dependency Submission" toggle |
+| Dependabot alerts | Whether vulnerability alerts are enabled, plus open counts by severity (critical, high, medium, low) and a separate count of alerts classified `malware` (a dependency that is itself malicious, rather than merely vulnerable; also counted in its matching severity bucket, not an additional total) |
+| Dependabot security updates | The permission-gated `security_and_analysis` toggle; absent access reads as `unknown`, never `disabled` |
+| Version updates | Whether `.github/dependabot.yml` exists and parses, its configured ecosystems, and ecosystems it covers that the dependency graph does not track at all |
+| Pull request health | Whether open Dependabot pull requests have failing checks or are backlogged against the effective `open-pull-requests-limit` (version updates only). Open pull requests are split into security updates and version updates using the `RepositoryVulnerabilityAlert.dependabotUpdate` GraphQL linkage. Whether Dependabot activity is paused for inactivity is checked separately (see below) and is authoritative even with zero open pull requests |
+| Dependency review | Whether a required status check matching `--dependency-review-check-pattern` (default `dependency review`) was found among the default branch's effective rules; there is no dedicated ruleset rule type for this, so it is always a substring match against a required status check name |
+
+```bash
+gh ghas-audit dependabot -o my-org --scan-depth diagnostics --dependency-review-check-pattern "dependency review"
+gh ghas-audit dependabot -o my-org --format csv --output dependabot.csv
+```
+
+Limitations specific to this command:
+
+- Backlog detection sums each configured update block's own explicit `open-pull-requests-limit`, falling back to GitHub's documented default of 5 only for a block that does not set one, and sums those limits per ecosystem (not per block): two update blocks for the same ecosystem (for example two separate npm directories) have their limits added together, but open pull requests are not individually attributed back to the specific block that opened them, since Dependabot's pull request payloads do not directly expose which configured block a pull request came from. A saturated block can therefore still be masked by headroom in a different, unsaturated block for the same ecosystem.
+- "Paused for inactivity" is checked authoritatively via the "Check if Dependabot security updates are enabled for a repository" REST endpoint's `paused` field, which GitHub populates even for a repository with zero open Dependabot pull requests; the `dependabot-paused` pull request label is used only as a fallback when that endpoint is unavailable. Security update pull requests are identified primarily via the `RepositoryVulnerabilityAlert.dependabotUpdate` GraphQL linkage (queried across all alert states, since GitHub can auto-dismiss an alert while the pull request it opened for that alert is still open and unmerged), with a package-name fallback (matched against both the pull request title and body, since grouped-update titles never name individual packages) for alerts whose link is stale or was never recorded, and only falling back to a `GHSA-` pull request body match if the query cannot be evaluated at all.
+- Private-registry credential problems are not directly observable through any public API and are out of scope for this command; a registry configured in `dependabot.yml` is reported, but whether its secret actually works is not verified.
+- Dependency review enforcement is never evaluated for GitHub's temporary private security-advisory forks (repositories whose name matches GitHub's documented `-ghsa-xxxx-xxxx-xxxx` suffix convention for these forks); their rules/rulesets endpoints always return 404 regardless of the real repository's configuration, so the check is skipped and reported as `not-evaluated` (`temporary_security_advisory_fork: true` in the output) rather than as a collection error.
 
 ## Upgrading from 1.x
 

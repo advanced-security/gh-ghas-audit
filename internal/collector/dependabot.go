@@ -16,6 +16,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/advanced-security/gh-ghas-audit/v2/internal/ghapi"
 	"github.com/advanced-security/gh-ghas-audit/v2/internal/model"
 )
 
@@ -840,7 +841,7 @@ func (c *DependabotCollector) collectVersionUpdates(ctx context.Context, org, na
 	for _, candidate := range []string{".github/dependabot.yml", ".github/dependabot.yaml"} {
 		content, err := c.fetchFileContent(ctx, org, name, candidate)
 		if err != nil {
-			if isNotFoundError(err) {
+			if ghapi.IsNotFound(err) {
 				continue
 			}
 			repo.Errors = append(repo.Errors, fmt.Sprintf("dependabot.yml: %v", err))
@@ -959,10 +960,6 @@ func (c *DependabotCollector) fetchFileContent(ctx context.Context, org, name, f
 	return decoded, nil
 }
 
-func isNotFoundError(err error) bool {
-	return strings.Contains(err.Error(), "404") || strings.Contains(strings.ToLower(err.Error()), "not found")
-}
-
 // temporarySecurityAdvisoryForkNamePattern matches GitHub's documented naming
 // convention for a temporary private fork automatically created to draft a
 // fix for a repository security advisory: the source repository's name,
@@ -1027,7 +1024,7 @@ func manifestEcosystem(filename string) string {
 		return "composer"
 	case base == "cargo.toml" || base == "cargo.lock":
 		return "cargo"
-	case strings.HasSuffix(base, ".csproj") || base == "packages.config":
+	case strings.HasSuffix(base, ".csproj") || strings.HasSuffix(base, ".vbproj") || base == "packages.config":
 		return "nuget"
 	default:
 		return ""
@@ -1476,7 +1473,16 @@ func (c *DependabotCollector) detectAutoSubmissionFromSBOM(ctx context.Context, 
 		return false, ""
 	}
 	for _, creator := range response.SBOM.CreationInfo.Creators {
-		tool := strings.TrimSpace(strings.TrimPrefix(creator, "Tool:"))
+		// SPDX creator entries are not all tools: a document can also list
+		// "Person: ..." or "Organization: ..." entries. strings.TrimPrefix
+		// returns its input unchanged when the prefix is absent, so without
+		// this explicit check a Person/Organization entry would pass
+		// through as if it were an unrecognized tool name, a false
+		// positive for auto-submission detection.
+		if !strings.HasPrefix(strings.ToLower(creator), "tool:") {
+			continue
+		}
+		tool := strings.TrimSpace(creator[len("Tool:"):])
 		if tool == "" {
 			continue
 		}
@@ -1497,7 +1503,7 @@ func (c *DependabotCollector) detectAutoSubmissionFromSBOM(ctx context.Context, 
 func (c *DependabotCollector) collectAlerts(ctx context.Context, org, name string, repo *model.DependabotRepo) {
 	enablementPath := fmt.Sprintf("repos/%s/%s/vulnerability-alerts", url.PathEscape(org), url.PathEscape(name))
 	if err := c.client.GetJSON(ctx, enablementPath, nil); err != nil {
-		if isNotFoundError(err) {
+		if ghapi.IsNotFound(err) {
 			repo.Status.DependabotAlerts = model.FeatureDisabled
 		} else {
 			repo.Errors = append(repo.Errors, fmt.Sprintf("vulnerability alerts status: %v", err))
@@ -2038,7 +2044,7 @@ func (c *DependabotCollector) collectDependencyReview(ctx context.Context, org, 
 	var classic classicRequiredStatusChecks
 	classicPath := fmt.Sprintf("repos/%s/%s/branches/%s/protection/required_status_checks", url.PathEscape(org), url.PathEscape(name), url.PathEscape(repo.DefaultBranch))
 	if err := c.client.GetJSON(ctx, classicPath, &classic); err != nil {
-		if !isNotFoundError(err) {
+		if !ghapi.IsNotFound(err) {
 			// A 404 here just means no classic protection is configured,
 			// which is a normal, non-error outcome (rulesets may still
 			// cover the branch). Anything else is a genuine collection

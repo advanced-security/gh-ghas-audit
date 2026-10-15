@@ -779,6 +779,32 @@ func TestDependabotCollectFlagsNuGetManifestMissingTransitiveCoverage(t *testing
 	}
 }
 
+// TestDependabotCollectReportsVBProjAsNuGetEcosystem verifies that a .vbproj
+// manifest, which buildTimeResolutionManifest already treats as a NuGet
+// build-time-resolution gap, is also classified as the "nuget" ecosystem by
+// manifestEcosystem — the two functions had drifted apart, which left a
+// .vbproj-only repository showing no ecosystem at all in
+// DependencyGraph.Ecosystems despite having a real coverage gap.
+func TestDependabotCollectReportsVBProjAsNuGetEcosystem(t *testing.T) {
+	client := newDependabotFakeClient()
+	vbprojNode := dependencyGraphManifestNode{Filename: "src/api/api.vbproj", Parseable: true, DependenciesCount: 4}
+	vbprojNode.Dependencies.Nodes = directDependencyNodes(4)
+	baseRepoResponses(t, client, []dependencyGraphManifestNode{vbprojNode})
+
+	options := DependabotOptions{Repository: "acme/repo", Concurrency: 1, Depth: DepthHealth}
+	report, err := NewDependabotCollector(client, options).Collect(context.Background(), "test")
+	if err != nil {
+		t.Fatalf("Collect returned an error: %v", err)
+	}
+	repo := report.Repositories[0]
+	if len(repo.DependencyGraph.Ecosystems) != 1 || repo.DependencyGraph.Ecosystems[0] != "nuget" {
+		t.Fatalf("ecosystems = %v, want [nuget]", repo.DependencyGraph.Ecosystems)
+	}
+	if len(repo.DependencyGraph.ManifestsMissingTransitive) != 1 || repo.DependencyGraph.ManifestsMissingTransitive[0] != "src/api/api.vbproj" {
+		t.Errorf("manifests missing transitive = %v, want [src/api/api.vbproj]", repo.DependencyGraph.ManifestsMissingTransitive)
+	}
+}
+
 // TestDependabotCollectDetectsAutoSubmissionEvenWithoutAGap verifies that a
 // build-time-resolution manifest (Maven, Gradle, or NuGet) whose dependency
 // graph already shows transitive dependencies (so there is no coverage gap
@@ -893,6 +919,44 @@ func TestDependabotCollectSBOMBaselineCreatorsDoNotCountAsAutoSubmission(t *test
 	repo := report.Repositories[0]
 	if repo.DependencyGraph.AutoSubmissionDetected {
 		t.Errorf("auto submission detected = true, want false (only baseline SBOM creators were present, action %q)", repo.DependencyGraph.AutoSubmissionAction)
+	}
+}
+
+// TestDependabotCollectSBOMPersonAndOrganizationCreatorsAreNotTools verifies
+// that non-tool SPDX creator entries (Person:/Organization:, as opposed to
+// Tool:) are never mistaken for an unrecognized auto-submission tool.
+// strings.TrimPrefix returns its input unchanged when the prefix is absent,
+// so without an explicit "is this actually a Tool: entry" check, a
+// "Person: Jane Doe" creator would pass straight through as if it were a
+// real, unrecognized tool name.
+func TestDependabotCollectSBOMPersonAndOrganizationCreatorsAreNotTools(t *testing.T) {
+	client := newDependabotFakeClient()
+	csprojNode := dependencyGraphManifestNode{Filename: "api.csproj", Parseable: true, DependenciesCount: 200}
+	csprojNode.Dependencies.Nodes = relationshipDependencyNodes("transitive", 200)
+	baseRepoResponses(t, client, []dependencyGraphManifestNode{csprojNode})
+
+	client.set("repos/acme/repo/dependency-graph/sbom", map[string]any{
+		"sbom": map[string]any{
+			"creationInfo": map[string]any{
+				"creators": []string{
+					"Tool: protobom-v0.0.0-dirty",
+					"Tool: GitHub.com-Dependency-Graph",
+					"Person: Jane Doe",
+					"Organization: Acme Corp",
+				},
+			},
+		},
+	})
+
+	options := DependabotOptions{Repository: "acme/repo", Concurrency: 1, Depth: DepthHealth}
+	report, err := NewDependabotCollector(client, options).Collect(context.Background(), "test")
+	if err != nil {
+		t.Fatalf("Collect returned an error: %v", err)
+	}
+	repo := report.Repositories[0]
+	if repo.DependencyGraph.AutoSubmissionDetected {
+		t.Errorf("auto submission detected = true, want false: Person/Organization creator entries must not be "+
+			"mistaken for an unrecognized tool (action %q)", repo.DependencyGraph.AutoSubmissionAction)
 	}
 }
 
@@ -1049,6 +1113,42 @@ func TestDependabotCollectConfigDepthNeverReportsHealthy(t *testing.T) {
 	}
 	if repo.Status.DependencyGraph != model.FeatureNotEvaluated {
 		t.Errorf("dependency graph = %q, want not-evaluated at config depth", repo.Status.DependencyGraph)
+	}
+}
+
+// TestDependabotCollectDoesNotMisclassifyGenuineErrorsAsNotFound verifies
+// that a real collection failure whose message happens to mention "404" or
+// "not found" (for example a transient gateway error relayed from a proxy,
+// or a permission error whose body happens to quote a 404 from somewhere
+// else) is never misinterpreted as "file does not exist" just because of
+// substring matching against err.Error(). Only a genuine *ghapi.StatusError
+// with StatusCode 404 should be treated that way.
+func TestDependabotCollectDoesNotMisclassifyGenuineErrorsAsNotFound(t *testing.T) {
+	client := newDependabotFakeClient()
+	baseRepoResponses(t, client, nil)
+	client.set("repos/acme/repo/contents/.github/dependabot.yml",
+		fmt.Errorf("upstream proxy returned an unexpected body mentioning 404 and not found, but this is not itself a 404"))
+	client.set("repos/acme/repo/contents/.github/dependabot.yaml",
+		fmt.Errorf("upstream proxy returned an unexpected body mentioning 404 and not found, but this is not itself a 404"))
+
+	options := DependabotOptions{Repository: "acme/repo", Concurrency: 1, Depth: DepthHealth}
+	report, err := NewDependabotCollector(client, options).Collect(context.Background(), "test")
+	if err != nil {
+		t.Fatalf("Collect returned an error: %v", err)
+	}
+	repo := report.Repositories[0]
+	if repo.Status.VersionUpdates != model.VersionUpdatesUnknown {
+		t.Fatalf("version updates = %q, want unknown: a non-StatusError mentioning \"404\" in its text must not be "+
+			"treated as a real 404 and silently skipped", repo.Status.VersionUpdates)
+	}
+	found := false
+	for _, e := range repo.Errors {
+		if strings.Contains(e, "dependabot.yml") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected a recorded collection error for dependabot.yml, got: %v", repo.Errors)
 	}
 }
 

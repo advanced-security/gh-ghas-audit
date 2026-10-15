@@ -146,12 +146,14 @@ type vulnerabilityAlertsPullRequestsResponse struct {
 
 type vulnerabilityAlertPullRequestNode struct {
 	// State is the alert's own state (OPEN, DISMISSED, FIXED or
-	// AUTO_DISMISSED). It is deliberately not used to filter which alerts are
-	// queried (see the comment on collectSecurityUpdatePullRequestNumbers),
-	// but is used to decide which alerts are trustworthy evidence for the
-	// package-name fallback: a FIXED or explicitly DISMISSED alert no longer
-	// indicates an active problem, so its package name is excluded to avoid
-	// misclassifying an unrelated, later, non-security bump of that package.
+	// AUTO_DISMISSED). Filtering to only trustworthy, still-relevant alerts
+	// already happens at the query level (see the states:[OPEN,
+	// AUTO_DISMISSED] filter on collectSecurityUpdatePullRequestNumbers's
+	// GraphQL query): FIXED and explicitly DISMISSED alerts are never
+	// fetched in the first place, so this field is not read anywhere in the
+	// collector today. It is kept on the response shape only in case a
+	// future caller needs to distinguish OPEN from AUTO_DISMISSED among the
+	// alerts that are fetched.
 	State                 string `json:"state"`
 	SecurityVulnerability *struct {
 		Package *struct {

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -320,7 +321,12 @@ func applyDependabotFilters(report *model.DependabotReport, severities []model.S
 }
 
 // mergeDependabotOrgErrors preserves organization-level scan errors across a
-// filtered rebuild, mirroring code scanning's mergeOrgErrors.
+// filtered rebuild, mirroring code scanning's mergeOrgErrors, including its
+// final sort by login: the per-login iteration below that decides which
+// previously-errored orgs need to be appended back runs over a map, whose
+// iteration order Go deliberately randomizes, so without a sort the order of
+// any appended entries (and therefore this user-facing table/json/csv
+// output) would be unstable from one run to the next.
 func mergeDependabotOrgErrors(rebuilt []model.OrgReport, previous []model.OrgReport) []model.OrgReport {
 	errorsByLogin := map[string]string{}
 	for _, org := range previous {
@@ -337,6 +343,7 @@ func mergeDependabotOrgErrors(rebuilt []model.OrgReport, previous []model.OrgRep
 			rebuilt = append(rebuilt, model.OrgReport{Login: login, Error: message})
 		}
 	}
+	sort.Slice(rebuilt, func(i, j int) bool { return rebuilt[i].Login < rebuilt[j].Login })
 	return rebuilt
 }
 

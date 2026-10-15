@@ -286,3 +286,31 @@ func TestResolveDependabotPropertyColumnsUsesDiscoveredNames(t *testing.T) {
 		t.Fatalf("no repositories should yield no property columns, got %v", got)
 	}
 }
+
+// TestResolveDependabotPropertyColumnsIsDeterministicallySorted verifies
+// that discovered property columns, across several differently-cased
+// property names, always come back in the same sorted order (and with the
+// same lexicographically-smallest casing chosen per folded name) regardless
+// of Go's randomized map iteration order — this is user-facing table/json/csv
+// column output, so its ordering must be stable across runs.
+func TestResolveDependabotPropertyColumnsIsDeterministicallySorted(t *testing.T) {
+	report := &model.DependabotReport{
+		Repositories: []model.DependabotRepo{
+			{Properties: map[string]string{"Zebra": "z", "apple": "a"}},
+			{Properties: map[string]string{"Mango": "m", "APPLE": "a2"}},
+		},
+	}
+	for attempt := 0; attempt < 20; attempt++ {
+		got := ResolveDependabotPropertyColumns(report, nil)
+		want := []string{"APPLE", "Mango", "Zebra"}
+		if len(got) != len(want) {
+			t.Fatalf("attempt %d: property columns = %v, want %v", attempt, got, want)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("attempt %d: property columns = %v, want %v (sorted, lexicographically-smallest casing per name)",
+					attempt, got, want)
+			}
+		}
+	}
+}

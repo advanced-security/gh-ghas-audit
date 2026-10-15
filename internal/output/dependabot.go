@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -353,7 +354,10 @@ func writeDependabotFooter(writer io.Writer, report *model.DependabotReport, isT
 
 // ResolveDependabotPropertyColumns returns the property columns to include in
 // file output formats: every property found on any repository when none were
-// explicitly requested, mirroring ResolvePropertyColumns for code scanning.
+// explicitly requested, mirroring ResolvePropertyColumns for code scanning
+// (including its lexicographically-smallest-spelling and final sort, so the
+// resulting column order and casing do not depend on map iteration order,
+// which Go deliberately randomizes).
 func ResolveDependabotPropertyColumns(report *model.DependabotReport, requested []string) []string {
 	if len(requested) > 0 {
 		return requested
@@ -362,7 +366,7 @@ func ResolveDependabotPropertyColumns(report *model.DependabotReport, requested 
 	for _, repo := range report.Repositories {
 		for name := range repo.Properties {
 			key := strings.ToLower(name)
-			if _, ok := seen[key]; !ok {
+			if existing, ok := seen[key]; !ok || name < existing {
 				seen[key] = name
 			}
 		}
@@ -374,5 +378,6 @@ func ResolveDependabotPropertyColumns(report *model.DependabotReport, requested 
 	for _, name := range seen {
 		names = append(names, name)
 	}
+	sort.Strings(names)
 	return names
 }

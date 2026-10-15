@@ -162,3 +162,27 @@ func TestApplyDependabotFiltersRecomputesSummary(t *testing.T) {
 		t.Fatalf("organization-level scan errors must survive filtering, got %v", report.Organizations)
 	}
 }
+
+// TestMergeDependabotOrgErrorsSortsAppendedEntries verifies that when
+// multiple organizations' repositories are entirely filtered out, their
+// re-appended error entries come back in a deterministic (alphabetical by
+// login), not map-iteration-order-dependent, sequence — this is
+// user-facing table/json/csv output, so its ordering must be stable across
+// runs with identical input.
+func TestMergeDependabotOrgErrorsSortsAppendedEntries(t *testing.T) {
+	previous := []model.OrgReport{
+		{Login: "zeta", Error: "403"},
+		{Login: "mid", Error: "500"},
+		{Login: "alpha", Error: "403"},
+	}
+	for attempt := 0; attempt < 20; attempt++ {
+		merged := mergeDependabotOrgErrors(nil, previous)
+		if len(merged) != 3 {
+			t.Fatalf("merged = %v, want 3 entries", merged)
+		}
+		if merged[0].Login != "alpha" || merged[1].Login != "mid" || merged[2].Login != "zeta" {
+			t.Fatalf("attempt %d: merged order = [%s, %s, %s], want [alpha, mid, zeta]",
+				attempt, merged[0].Login, merged[1].Login, merged[2].Login)
+		}
+	}
+}
